@@ -1,0 +1,26 @@
+# Operating System
+.DS_Store
+Thumbs.db
+
+# Backend
+backend/vendor/
+backend/.env
+backend/.phpunit.result.cache
+backend/storage/logs/*.log
+backend/storage/framework/cache/*
+backend/storage/framework/sessions/*
+backend/storage/framework/views/*
+backend/database/*.sqlite
+backend/database/*.sqlite-journal
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+frontend/.env.*.local
+frontend/out/
+
+# IDE
+.idea/
+.vscode/
+*.swp
