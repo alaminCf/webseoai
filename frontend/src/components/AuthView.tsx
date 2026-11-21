@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
+import Link from 'next/link';
 import { Sparkles, Lock, Mail, ArrowRight, ShieldCheck, User } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 
@@ -160,8 +161,17 @@ export function AuthView() {
           </div>
         </div>
 
-        <div className="text-center mt-6 text-xs text-zinc-500">
-          Internal Platform Deployment • Protected by Multi-Tenant RBAC & Sanctum
+        <div className="text-center mt-6 text-xs text-zinc-500 space-y-2">
+          <div>Protected by Multi-Tenant RBAC &amp; AES-256 Encrypted OAuth Tokens</div>
+          <div className="flex items-center justify-center gap-4 text-[11px]">
+            <Link href="/privacy" className="text-zinc-400 hover:text-emerald-400 transition">
+              Privacy Policy
+            </Link>
+            <span className="text-zinc-700">•</span>
+            <Link href="/terms" className="text-zinc-400 hover:text-emerald-400 transition">
+              Terms of Service
+            </Link>
+          </div>
         </div>
       </div>
     </div>
