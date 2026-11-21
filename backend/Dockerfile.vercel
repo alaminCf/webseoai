@@ -1,0 +1,70 @@
+FROM dunglas/frankenphp:1-php8.4
+
+# Install required PHP extensions for Laravel + SQLite + PostgreSQL + DOM parsing
+RUN install-php-extensions \
+    pdo_sqlite \
+    pdo_pgsql \
+    pgsql \
+    mbstring \
+    xml \
+    dom \
+    curl \
+    intl \
+    bcmath \
+    opcache \
+    zip
+
+# Install Composer
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+WORKDIR /app
+
+# Copy composer files first for optimal Docker layer caching
+COPY composer.json composer.lock ./
+RUN composer install --no-dev --no-interaction --prefer-dist --no-scripts --optimize-autoloader
+
+# Copy application source
+COPY . .
+
+# Ensure writable storage/cache directories and run package discovery
+RUN mkdir -p storage/framework/cache/data \
+    storage/framework/sessions \
+    storage/framework/views \
+    storage/logs \
+    bootstrap/cache \
+    database \
+    && chmod -R 775 storage bootstrap/cache \
+    && php artisan package:discover --ansi \
+    && chmod +x /app/docker-entrypoint.sh
+
+# Pre-build a seeded SQLite template inside the image for instant zero-config boot
+RUN touch /app/database/seed-template.sqlite \
+    && APP_ENV=production \
+       APP_KEY=base64:L+i8jagaIVLob7C6PXuC3aZQBaK5FTQYWLxfFPGbITc= \
+       DB_CONNECTION=sqlite \
+       DB_DATABASE=/app/database/seed-template.sqlite \
+       CACHE_STORE=array \
+       SESSION_DRIVER=array \
+       QUEUE_CONNECTION=sync \
+       php artisan migrate --force \
+    && APP_ENV=production \
+       APP_KEY=base64:L+i8jagaIVLob7C6PXuC3aZQBaK5FTQYWLxfFPGbITc= \
+       DB_CONNECTION=sqlite \
+       DB_DATABASE=/app/database/seed-template.sqlite \
+       CACHE_STORE=array \
+       SESSION_DRIVER=array \
+       QUEUE_CONNECTION=sync \
+       php artisan db:seed --force
+
+ENV APP_NAME="Web SEO AI"
+ENV APP_ENV=production
+ENV APP_DEBUG=false
+ENV LOG_CHANNEL=stderr
+ENV CACHE_STORE=array
+ENV SESSION_DRIVER=array
+ENV QUEUE_CONNECTION=sync
+ENV PORT=80
+
+EXPOSE 80
+
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

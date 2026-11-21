@@ -118,6 +118,9 @@ class CrawlController extends Controller
             $crawlJob->refresh();
         } else {
             RunWebsiteCrawlJob::dispatch($crawlJob->id, false);
+            if (config('queue.default') === 'sync') {
+                $crawlJob->refresh();
+            }
         }
 
         return $this->success([

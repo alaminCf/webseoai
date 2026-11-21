@@ -26,7 +26,7 @@ import {
   Ban,
 } from 'lucide-react';
 import { Website, AuditRun, AuditIssue, CrawledPage } from '@/types';
-import { api } from '@/lib/api';
+import { api, getApiBaseUrl } from '@/lib/api';
 import { useToast } from '@/context/ToastContext';
 import { CrawlProgressModal } from './CrawlProgressModal';
 import { AuditCompareModal } from './AuditCompareModal';
@@ -116,7 +116,7 @@ export function AuditOverviewView({ website, onRefreshWebsites, onNavigateToStra
     try {
       const token = api.getToken();
       const orgId = api.getOrganizationId();
-      const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001/api/v1';
+      const baseUrl = getApiBaseUrl();
       const exportUrl = `${baseUrl}/audits/${latestAudit.id}/export?format=${format}`;
 
       const res = await fetch(exportUrl, {

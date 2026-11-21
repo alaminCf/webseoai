@@ -25,6 +25,7 @@ import {
 } from 'lucide-react';
 import { Website, CmsChangeRequest, CmsSnapshot, CmsCapabilities } from '@/types';
 import { useAuth } from '@/context/AuthContext';
+import { getApiBaseUrl } from '@/lib/api';
 
 interface CmsApprovalsViewProps {
   website: Website | null;
@@ -73,7 +74,7 @@ export function CmsApprovalsView({ website, onNavigateToContent }: CmsApprovalsV
 
       // 1. Fetch Capabilities
       const capRes = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/cms/capabilities`,
+        `${getApiBaseUrl()}/websites/${website.id}/cms/capabilities`,
         { credentials: 'omit', headers }
       );
       if (capRes.ok) {
@@ -83,7 +84,7 @@ export function CmsApprovalsView({ website, onNavigateToContent }: CmsApprovalsV
 
       // 2. Fetch Change Requests
       const crRes = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/cms/change-requests?status=${filterStatus}`,
+        `${getApiBaseUrl()}/websites/${website.id}/cms/change-requests?status=${filterStatus}`,
         { credentials: 'omit', headers }
       );
       if (crRes.ok) {
@@ -93,7 +94,7 @@ export function CmsApprovalsView({ website, onNavigateToContent }: CmsApprovalsV
 
       // 3. Fetch Snapshots
       const snapRes = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/cms/snapshots`,
+        `${getApiBaseUrl()}/websites/${website.id}/cms/snapshots`,
         { credentials: 'omit', headers }
       );
       if (snapRes.ok) {
@@ -125,7 +126,7 @@ export function CmsApprovalsView({ website, onNavigateToContent }: CmsApprovalsV
       if (stageForm.canonical_url) proposedPayload.canonical_url = stageForm.canonical_url;
 
       const res = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/cms/change-requests/stage`,
+        `${getApiBaseUrl()}/websites/${website.id}/cms/change-requests/stage`,
         {
           method: 'POST',
           headers: {
@@ -169,7 +170,7 @@ export function CmsApprovalsView({ website, onNavigateToContent }: CmsApprovalsV
     try {
       const token = localStorage.getItem('auth_token');
       const res = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/cms/change-requests/${cr.id}/approve`,
+        `${getApiBaseUrl()}/websites/${website.id}/cms/change-requests/${cr.id}/approve`,
         {
           method: 'POST',
           headers: {
@@ -201,7 +202,7 @@ export function CmsApprovalsView({ website, onNavigateToContent }: CmsApprovalsV
     try {
       const token = localStorage.getItem('auth_token');
       const res = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/cms/change-requests/${cr.id}/reject`,
+        `${getApiBaseUrl()}/websites/${website.id}/cms/change-requests/${cr.id}/reject`,
         {
           method: 'POST',
           headers: {
@@ -236,7 +237,7 @@ export function CmsApprovalsView({ website, onNavigateToContent }: CmsApprovalsV
     try {
       const token = localStorage.getItem('auth_token');
       const res = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/cms/change-requests/${cr.id}/execute`,
+        `${getApiBaseUrl()}/websites/${website.id}/cms/change-requests/${cr.id}/execute`,
         {
           method: 'POST',
           headers: {
@@ -275,7 +276,7 @@ export function CmsApprovalsView({ website, onNavigateToContent }: CmsApprovalsV
     try {
       const token = localStorage.getItem('auth_token');
       const res = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/cms/change-requests/${cr.id}/rollback`,
+        `${getApiBaseUrl()}/websites/${website.id}/cms/change-requests/${cr.id}/rollback`,
         {
           method: 'POST',
           headers: {

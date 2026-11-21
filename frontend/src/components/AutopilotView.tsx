@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { Website, AutomationRule, WorkflowRun, WorkflowApproval } from '@/types';
 import { useAuth } from '@/context/AuthContext';
+import { getApiBaseUrl } from '@/lib/api';
 
 interface AutopilotViewProps {
   website: Website | null;
@@ -75,7 +76,7 @@ export function AutopilotView({ website, onNavigateToApprovals }: AutopilotViewP
 
       // 1. Fetch Rules
       const rulesRes = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/automation/rules`,
+        `${getApiBaseUrl()}/websites/${website.id}/automation/rules`,
         { credentials: 'omit', headers }
       );
       if (rulesRes.ok) {
@@ -85,7 +86,7 @@ export function AutopilotView({ website, onNavigateToApprovals }: AutopilotViewP
 
       // 2. Fetch Runs
       const runsRes = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/automation/runs`,
+        `${getApiBaseUrl()}/websites/${website.id}/automation/runs`,
         { credentials: 'omit', headers }
       );
       if (runsRes.ok) {
@@ -95,7 +96,7 @@ export function AutopilotView({ website, onNavigateToApprovals }: AutopilotViewP
 
       // 3. Fetch Approvals
       const appRes = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/automation/approvals`,
+        `${getApiBaseUrl()}/websites/${website.id}/automation/approvals`,
         { credentials: 'omit', headers }
       );
       if (appRes.ok) {
@@ -122,7 +123,7 @@ export function AutopilotView({ website, onNavigateToApprovals }: AutopilotViewP
       setIsLoading(true);
       const token = localStorage.getItem('auth_token');
       const res = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/automation/rules`,
+        `${getApiBaseUrl()}/websites/${website.id}/automation/rules`,
         {
           method: 'POST',
           headers: {
@@ -155,7 +156,7 @@ export function AutopilotView({ website, onNavigateToApprovals }: AutopilotViewP
     try {
       const token = localStorage.getItem('auth_token');
       const res = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/automation/rules/${rule.id}/status`,
+        `${getApiBaseUrl()}/websites/${website.id}/automation/rules/${rule.id}/status`,
         {
           method: 'PATCH',
           headers: {
@@ -185,7 +186,7 @@ export function AutopilotView({ website, onNavigateToApprovals }: AutopilotViewP
     try {
       const token = localStorage.getItem('auth_token');
       const res = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/automation/rules/${rule.id}/trigger`,
+        `${getApiBaseUrl()}/websites/${website.id}/automation/rules/${rule.id}/trigger`,
         {
           method: 'POST',
           headers: {
@@ -220,7 +221,7 @@ export function AutopilotView({ website, onNavigateToApprovals }: AutopilotViewP
     try {
       const token = localStorage.getItem('auth_token');
       const res = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/automation/runs/${run.id}/cancel`,
+        `${getApiBaseUrl()}/websites/${website.id}/automation/runs/${run.id}/cancel`,
         {
           method: 'POST',
           headers: {
@@ -249,7 +250,7 @@ export function AutopilotView({ website, onNavigateToApprovals }: AutopilotViewP
     try {
       const token = localStorage.getItem('auth_token');
       const res = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/automation/approvals/${approval.id}/approve`,
+        `${getApiBaseUrl()}/websites/${website.id}/automation/approvals/${approval.id}/approve`,
         {
           method: 'POST',
           headers: {
@@ -280,7 +281,7 @@ export function AutopilotView({ website, onNavigateToApprovals }: AutopilotViewP
     try {
       const token = localStorage.getItem('auth_token');
       const res = await fetch(
-        `http://localhost:8001/api/v1/websites/${website.id}/automation/approvals/${approval.id}/reject`,
+        `${getApiBaseUrl()}/websites/${website.id}/automation/approvals/${approval.id}/reject`,
         {
           method: 'POST',
           headers: {
