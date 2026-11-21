@@ -140,16 +140,27 @@ export function CrawlProgressModal({
       );
 
       if (res.success) {
-        toast.success('Full technical SEO audit crawl started!');
         prevStatusRef.current = 'queued';
         const statusRes = await api.get<CrawlJob>(`/websites/${website.id}/crawl/status`);
         if (statusRes.success && statusRes.data) {
           setActiveJob(statusRes.data);
           prevStatusRef.current = statusRes.data.status;
+
+          if (statusRes.data.status === 'completed') {
+            toast.success('Full technical SEO audit completed!');
+            onCrawlCompleted();
+          } else if (statusRes.data.status === 'failed') {
+            toast.error(statusRes.data.error_message || 'Crawl finished with an error.');
+          } else {
+            toast.success('Full technical SEO audit crawl started!');
+            startPolling();
+          }
+        } else {
+          toast.success('Full technical SEO audit crawl started!');
+          startPolling();
         }
-        startPolling();
       } else {
-        toast.error(res.error?.message || 'Could not initiate crawl.');
+        toast.error(res.error?.message || res.message || 'Could not initiate crawl.');
       }
     } catch {
       toast.error('Network error starting crawl.');
@@ -297,11 +308,16 @@ export function CrawlProgressModal({
                   className="inline-flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold shadow transition"
                 >
                   {isSubmitting ? (
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Crawling & Auditing...</span>
+                    </>
                   ) : (
-                    <Play className="w-3.5 h-3.5" />
+                    <>
+                      <Play className="w-3.5 h-3.5" />
+                      <span>{activeJob ? 'Start Fresh Audit Crawl' : 'Launch Audit Crawler'}</span>
+                    </>
                   )}
-                  {activeJob ? 'Start Fresh Audit Crawl' : 'Launch Audit Crawler'}
                 </button>
               </div>
             </div>
