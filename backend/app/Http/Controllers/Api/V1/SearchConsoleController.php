@@ -10,6 +10,7 @@ use App\Models\Website;
 use App\Models\WebsiteIntegration;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Throwable;
@@ -36,42 +37,113 @@ class SearchConsoleController extends Controller
             'success' => true,
             'data' => [
                 'authorization_url' => $authUrl,
+                'oauth_mode' => $this->gscService->isLiveConfigured() ? 'live' : 'sandbox',
+                'redirect_uri' => $this->gscService->getRedirectUri(),
                 'scopes' => config('search_console.scopes'),
             ],
         ]);
     }
 
     /**
-     * Handle OAuth callback from Google or sandbox callback.
+     * Handle OAuth callback from Google (browser redirect) or sandbox callback (JSON).
      */
-    public function callback(Request $request): JsonResponse
+    public function callback(Request $request): JsonResponse|RedirectResponse
     {
-        $validated = $request->validate([
-            'code' => 'required|string',
-            'state' => 'required|string',
-        ]);
+        $code = (string) $request->query('code', '');
+        $state = (string) $request->query('state', '');
+        $oauthError = (string) $request->query('error', '');
+        $isApiCall = $request->expectsJson() || str_starts_with($code, 'sandbox_');
+
+        $frontendBase = rtrim((string) (config('search_console.frontend_url') ?: url('/')), '/');
+        $decodedWebsiteId = null;
+        if ($state !== '') {
+            $decoded = json_decode(base64_decode($state), true);
+            if (is_array($decoded) && isset($decoded['website_id'])) {
+                $decodedWebsiteId = (int) $decoded['website_id'];
+            }
+        }
+
+        // User cancelled or Google returned an OAuth error
+        if ($oauthError !== '') {
+            $reason = $request->query('error_description') ?: "Google OAuth error: {$oauthError}";
+            if ($isApiCall) {
+                return response()->json([
+                    'success' => false,
+                    'error' => [
+                        'code' => 'GSC_AUTH_DENIED',
+                        'message' => $reason,
+                    ],
+                ], 400);
+            }
+
+            $params = array_filter([
+                'tab' => 'performance',
+                'gsc' => 'error',
+                'reason' => $reason,
+                'website_id' => $decodedWebsiteId,
+            ], fn ($v) => $v !== null && $v !== '');
+
+            return redirect()->away($frontendBase . '/?' . http_build_query($params));
+        }
+
+        if ($code === '' || $state === '') {
+            if ($isApiCall) {
+                return response()->json([
+                    'success' => false,
+                    'error' => [
+                        'code' => 'VALIDATION_FAILED',
+                        'message' => 'Missing required OAuth code or state parameter.',
+                    ],
+                ], 422);
+            }
+
+            return redirect()->away($frontendBase . '/?' . http_build_query([
+                'tab' => 'performance',
+                'gsc' => 'error',
+                'reason' => 'Missing required OAuth code or state parameter.',
+            ]));
+        }
 
         try {
-            $integration = $this->gscService->handleCallback($validated['code'], $validated['state']);
+            $integration = $this->gscService->handleCallback($code, $state);
 
-            return response()->json([
-                'success' => true,
-                'message' => 'Google Search Console connected successfully.',
-                'data' => [
-                    'status' => $integration->status,
-                    'selected_property' => $integration->metadata['selected_property'] ?? null,
-                    'properties' => $integration->metadata['properties'] ?? [],
-                    'is_sandbox' => !empty($integration->metadata['is_sandbox']),
-                ],
-            ]);
+            if ($isApiCall) {
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Google Search Console connected successfully.',
+                    'data' => [
+                        'status' => $integration->status,
+                        'selected_property' => $integration->metadata['selected_property'] ?? null,
+                        'properties' => $integration->metadata['properties'] ?? [],
+                        'is_sandbox' => !empty($integration->metadata['is_sandbox']),
+                    ],
+                ]);
+            }
+
+            return redirect()->away($frontendBase . '/?' . http_build_query([
+                'tab' => 'performance',
+                'gsc' => 'connected',
+                'website_id' => $integration->website_id,
+            ]));
         } catch (Throwable $e) {
-            return response()->json([
-                'success' => false,
-                'error' => [
-                    'code' => 'GSC_AUTH_FAILED',
-                    'message' => $e->getMessage(),
-                ],
-            ], 400);
+            if ($isApiCall) {
+                return response()->json([
+                    'success' => false,
+                    'error' => [
+                        'code' => 'GSC_AUTH_FAILED',
+                        'message' => $e->getMessage(),
+                    ],
+                ], 400);
+            }
+
+            $params = array_filter([
+                'tab' => 'performance',
+                'gsc' => 'error',
+                'reason' => $e->getMessage(),
+                'website_id' => $decodedWebsiteId,
+            ], fn ($v) => $v !== null && $v !== '');
+
+            return redirect()->away($frontendBase . '/?' . http_build_query($params));
         }
     }
 
@@ -112,6 +184,8 @@ class SearchConsoleController extends Controller
                 'last_synced_at' => $integration ? $integration->last_synced_at : null,
                 'last_error' => $integration ? $integration->last_error : null,
                 'is_sandbox' => !empty($integration->metadata['is_sandbox']),
+                'oauth_mode' => $this->gscService->isLiveConfigured() ? 'live' : 'sandbox',
+                'redirect_uri' => $this->gscService->getRedirectUri(),
                 'latest_sync_log' => $latestSync,
             ],
         ]);

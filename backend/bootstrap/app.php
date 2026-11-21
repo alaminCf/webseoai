@@ -18,6 +18,9 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware) {
+        // Trust reverse proxy headers (Vercel, Cloudflare, Load Balancers) so HTTPS URLs generate accurately
+        $middleware->trustProxies(at: '*');
+
         $middleware->alias([
             'org.context' => EnsureOrganizationContext::class,
             'org.role' => RequireOrganizationRole::class,

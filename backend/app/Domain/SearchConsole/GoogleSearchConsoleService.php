@@ -23,11 +23,30 @@ class GoogleSearchConsoleService
 
     public function __construct()
     {
-        $this->clientId = (string) config('search_console.client_id', '');
-        $this->clientSecret = (string) config('search_console.client_secret', '');
-        $this->redirectUri = (string) config('search_console.redirect_uri', 'http://localhost:8001/api/v1/integrations/google-search-console/callback');
+        $this->clientId = trim((string) config('search_console.client_id', ''));
+        $this->clientSecret = trim((string) config('search_console.client_secret', ''));
+        $configuredRedirect = trim((string) config('search_console.redirect_uri', ''));
+        $this->redirectUri = $configuredRedirect !== ''
+            ? $configuredRedirect
+            : url('/api/v1/integrations/google-search-console/callback');
         $this->scopes = config('search_console.scopes', ['https://www.googleapis.com/auth/webmasters.readonly']);
         $this->sandboxFallback = (bool) config('search_console.sandbox_fallback', true);
+    }
+
+    /**
+     * Whether real Google OAuth 2.0 credentials are configured.
+     */
+    public function isLiveConfigured(): bool
+    {
+        return $this->clientId !== '' && $this->clientSecret !== '';
+    }
+
+    /**
+     * Return the active OAuth 2.0 callback redirect URI.
+     */
+    public function getRedirectUri(): string
+    {
+        return $this->redirectUri;
     }
 
     /**
@@ -43,9 +62,12 @@ class GoogleSearchConsoleService
         ];
         $state = base64_encode(json_encode($statePayload));
 
-        if (empty($this->clientId)) {
+        if (!$this->isLiveConfigured()) {
             // If OAuth credentials are not set, return sandbox authorization URL
-            return url("/api/v1/integrations/google-search-console/sandbox-callback?state={$state}&code=sandbox_gsc_auth_code");
+            return url('/api/v1/integrations/google-search-console/sandbox-callback') . '?' . http_build_query([
+                'state' => $state,
+                'code' => 'sandbox_gsc_auth_code',
+            ]);
         }
 
         $params = http_build_query([
@@ -54,6 +76,7 @@ class GoogleSearchConsoleService
             'response_type' => 'code',
             'scope' => implode(' ', $this->scopes),
             'access_type' => 'offline',
+            'include_granted_scopes' => 'true',
             'prompt' => 'consent select_account',
             'state' => $state,
         ]);
@@ -76,7 +99,7 @@ class GoogleSearchConsoleService
             ->firstOrFail();
 
         // Check if code is sandbox
-        if (str_starts_with($code, 'sandbox_') || empty($this->clientId)) {
+        if (str_starts_with($code, 'sandbox_') || !$this->isLiveConfigured()) {
             return $this->connectSandbox($website);
         }
 
@@ -106,12 +129,24 @@ class GoogleSearchConsoleService
             throw new Exception('No access token returned from Google.');
         }
 
+        // Preserve existing refresh_token if Google omits it on re-authorization
+        if (!$refreshToken) {
+            $existing = WebsiteIntegration::where('website_id', $website->id)
+                ->where('provider', WebsiteIntegration::PROVIDER_GSC)
+                ->first();
+            $existingCreds = $existing?->getDecryptedCredentials();
+            if (!empty($existingCreds['refresh_token']) && empty($existingCreds['is_sandbox'])) {
+                $refreshToken = $existingCreds['refresh_token'];
+            }
+        }
+
         $credentials = [
             'access_token' => $accessToken,
             'refresh_token' => $refreshToken,
             'expires_at' => now()->addSeconds($expiresIn)->timestamp,
             'token_type' => $tokenData['token_type'] ?? 'Bearer',
             'scope' => $tokenData['scope'] ?? '',
+            'is_sandbox' => false,
         ];
 
         // Fetch user's verified properties to auto-select best match
@@ -130,6 +165,7 @@ class GoogleSearchConsoleService
                 'last_error' => null,
                 'metadata' => [
                     'account_connected' => true,
+                    'is_sandbox' => false,
                     'connected_at' => now()->toIso8601String(),
                     'selected_property' => $selectedProperty,
                     'properties' => $properties,
@@ -512,7 +548,7 @@ class GoogleSearchConsoleService
      */
     private function querySearchAnalyticsFromGoogle(string $accessToken, string $propertyId, string $startDate, string $endDate): array
     {
-        $encodedSiteUrl = urlencode($propertyId);
+        $encodedSiteUrl = rawurlencode($propertyId);
         $endpoint = "https://www.googleapis.com/webmasters/v3/sites/{$encodedSiteUrl}/searchAnalytics/query";
 
         $allRows = [];
@@ -596,20 +632,25 @@ class GoogleSearchConsoleService
      */
     private function determineBestMatchingProperty(Website $website, array $properties): string
     {
-        $domain = strtolower($website->domain);
-        $scDomain = "sc-domain:{$domain}";
-        $urlPrefixHttps = "https://{$domain}/";
-        $urlPrefixHttp = "http://{$domain}/";
+        $domain = preg_replace('/^www\./i', '', strtolower($website->domain));
+        $candidates = [
+            "sc-domain:{$domain}",
+            "https://{$domain}/",
+            "https://www.{$domain}/",
+            "http://{$domain}/",
+            "http://www.{$domain}/",
+        ];
 
-        foreach ($properties as $prop) {
-            $url = strtolower($prop['siteUrl']);
-            if ($url === $scDomain) return $prop['siteUrl'];
-            if ($url === $urlPrefixHttps) return $prop['siteUrl'];
-            if ($url === $urlPrefixHttp) return $prop['siteUrl'];
+        foreach ($candidates as $candidate) {
+            foreach ($properties as $prop) {
+                if (strtolower($prop['siteUrl'] ?? '') === $candidate) {
+                    return $prop['siteUrl'];
+                }
+            }
         }
 
-        // Return first or fallback to sc-domain
-        return !empty($properties[0]['siteUrl']) ? $properties[0]['siteUrl'] : $scDomain;
+        // Return first verified property or fallback to sc-domain
+        return !empty($properties[0]['siteUrl']) ? $properties[0]['siteUrl'] : "sc-domain:{$domain}";
     }
 
     /**

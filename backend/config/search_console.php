@@ -8,7 +8,10 @@ return [
     */
     'client_id' => env('GOOGLE_SEARCH_CONSOLE_CLIENT_ID', env('GOOGLE_CLIENT_ID')),
     'client_secret' => env('GOOGLE_SEARCH_CONSOLE_CLIENT_SECRET', env('GOOGLE_CLIENT_SECRET')),
-    'redirect_uri' => env('GOOGLE_SEARCH_CONSOLE_REDIRECT_URI', 'http://localhost:8001/api/v1/integrations/google-search-console/callback'),
+    // Leave null to auto-derive from current request origin (e.g. https://webseoai.vercel.app/api/v1/integrations/google-search-console/callback)
+    'redirect_uri' => env('GOOGLE_SEARCH_CONSOLE_REDIRECT_URI'),
+    // Frontend dashboard URL to redirect browser after live Google OAuth callback
+    'frontend_url' => env('FRONTEND_URL'),
     
     'scopes' => [
         'https://www.googleapis.com/auth/webmasters.readonly',

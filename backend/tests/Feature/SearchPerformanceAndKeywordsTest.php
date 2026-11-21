@@ -101,6 +101,70 @@ class SearchPerformanceAndKeywordsTest extends TestCase
         $this->assertArrayHasKey('access_token', $decrypted);
     }
 
+    public function test_live_google_oauth_connect_and_browser_redirect_callback(): void
+    {
+        config([
+            'search_console.client_id' => 'test-client-id.apps.googleusercontent.com',
+            'search_console.client_secret' => 'test-client-secret',
+            'search_console.redirect_uri' => 'https://webseoai.vercel.app/api/v1/integrations/google-search-console/callback',
+            'search_console.frontend_url' => 'https://webseoai.vercel.app',
+        ]);
+
+        // 1. Connect endpoint returns real Google OAuth URL with live mode
+        $connectRes = $this->actingAs($this->user)
+            ->withHeader('X-Organization-Id', $this->org->id)
+            ->getJson("/api/v1/websites/{$this->website->id}/search-console/connect");
+
+        $connectRes->assertOk()
+            ->assertJsonPath('data.oauth_mode', 'live');
+
+        $authUrl = $connectRes->json('data.authorization_url');
+        $this->assertStringStartsWith('https://accounts.google.com/o/oauth2/v2/auth?', $authUrl);
+        $this->assertStringContainsString('test-client-id.apps.googleusercontent.com', $authUrl);
+
+        // 2. Mock Google token exchange and Search Console sites API
+        Http::fake([
+            'https://oauth2.googleapis.com/token' => Http::response([
+                'access_token' => 'live_google_access_token_xyz',
+                'refresh_token' => 'live_google_refresh_token_abc',
+                'expires_in' => 3600,
+                'token_type' => 'Bearer',
+                'scope' => 'https://www.googleapis.com/auth/webmasters.readonly',
+            ], 200),
+            'https://www.googleapis.com/webmasters/v3/sites' => Http::response([
+                'siteEntry' => [
+                    ['siteUrl' => 'https://www.techboloy.com/', 'permissionLevel' => 'siteOwner'],
+                ],
+            ], 200),
+        ]);
+
+        $state = base64_encode(json_encode([
+            'website_id' => $this->website->id,
+            'organization_id' => $this->org->id,
+            'user_id' => $this->user->id,
+            'timestamp' => now()->timestamp,
+        ]));
+
+        // Browser redirect (Accept: text/html) should redirect back to dashboard performance tab
+        $redirectRes = $this->get('/api/v1/integrations/google-search-console/callback?code=real_google_code_123&state=' . urlencode($state));
+        $redirectRes->assertRedirect("https://webseoai.vercel.app/?tab=performance&gsc=connected&website_id={$this->website->id}");
+
+        $integration = WebsiteIntegration::where('website_id', $this->website->id)
+            ->where('provider', WebsiteIntegration::PROVIDER_GSC)
+            ->first();
+
+        $this->assertNotNull($integration);
+        $this->assertEquals(WebsiteIntegration::STATUS_CONNECTED, $integration->status);
+        $this->assertFalse((bool) ($integration->metadata['is_sandbox'] ?? true));
+        $this->assertEquals('https://www.techboloy.com/', $integration->metadata['selected_property']);
+
+        // 3. Cancellation (error=access_denied) redirects cleanly with gsc=error
+        $cancelRes = $this->get('/api/v1/integrations/google-search-console/callback?error=access_denied&state=' . urlencode($state));
+        $cancelRes->assertStatus(302);
+        $this->assertStringContainsString('gsc=error', $cancelRes->headers->get('Location'));
+        $this->assertStringContainsString("website_id={$this->website->id}", $cancelRes->headers->get('Location'));
+    }
+
     public function test_search_analytics_synchronization_and_performance_querying(): void
     {
         // Connect sandbox

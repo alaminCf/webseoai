@@ -141,6 +141,24 @@ export function SearchPerformanceView({
     }
   };
 
+  // Select active Search Console property
+  const handleSelectProperty = async (propertyId: string) => {
+    if (!website || !propertyId) return;
+    try {
+      const res = await api.post(`/websites/${website.id}/search-console/property`, {
+        property_id: propertyId,
+      });
+      if (res.success) {
+        toast.success(`Switched active property to ${propertyId}`);
+        loadData();
+      } else {
+        toast.error(res.error?.message || 'Could not update Search Console property.');
+      }
+    } catch {
+      toast.error('Failed to update Search Console property.');
+    }
+  };
+
   // Trigger Sync
   const handleSync = async () => {
     if (!website) return;
@@ -293,11 +311,26 @@ export function SearchPerformanceView({
             <button
               onClick={handleConnect}
               disabled={isConnecting}
-              className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 rounded-xl shadow transition"
+              className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-xl shadow transition"
             >
-              Authorize via OAuth (webmasters.readonly)
+              {isConnecting
+                ? 'Redirecting to Google...'
+                : status?.oauth_mode === 'live'
+                  ? 'Continue with Google Search Console'
+                  : 'Authorize via OAuth (webmasters.readonly)'}
             </button>
           </div>
+          {status?.oauth_mode === 'live' ? (
+            <p className="text-[11px] text-emerald-400/90 flex items-center justify-center gap-1.5">
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              Live Google OAuth 2.0 is active. You will be redirected to Google to grant read-only access.
+            </p>
+          ) : (
+            <p className="text-[11px] text-amber-400/90 flex items-center justify-center gap-1.5">
+              <Info className="w-3.5 h-3.5" />
+              Sandbox mode active (add GOOGLE_SEARCH_CONSOLE_CLIENT_ID &amp; SECRET in Vercel env vars for live Google OAuth).
+            </p>
+          )}
           <p className="text-[11px] text-zinc-400 flex items-center justify-center gap-1.5">
             <ShieldCheck className="w-3.5 h-3.5 text-zinc-400" />
             Tokens are stored with AES-256 envelope encryption. Only read-only search analytics scopes are requested.
@@ -312,9 +345,23 @@ export function SearchPerformanceView({
           <div className="p-3 bg-zinc-900/60 border border-zinc-800 rounded-xl flex flex-wrap items-center justify-between text-xs text-zinc-400 gap-3">
             <div className="flex items-center gap-2">
               <span className="font-semibold text-zinc-300">Property:</span>
-              <span className="font-mono text-emerald-400 bg-zinc-950 px-2 py-0.5 rounded border border-zinc-800">
-                {status.selected_property || `sc-domain:${website.domain}`}
-              </span>
+              {status.properties && status.properties.length > 1 ? (
+                <select
+                  value={status.selected_property || ''}
+                  onChange={(e) => handleSelectProperty(e.target.value)}
+                  className="font-mono text-emerald-400 bg-zinc-950 px-2 py-1 rounded border border-zinc-800 focus:outline-none focus:border-emerald-500/60 text-xs"
+                >
+                  {status.properties.map((p) => (
+                    <option key={p.siteUrl} value={p.siteUrl} className="bg-zinc-950 text-zinc-100">
+                      {p.siteUrl} ({p.permissionLevel})
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span className="font-mono text-emerald-400 bg-zinc-950 px-2 py-0.5 rounded border border-zinc-800">
+                  {status.selected_property || `sc-domain:${website.domain}`}
+                </span>
+              )}
             </div>
             <div className="flex items-center gap-4 text-[11px]">
               <div>

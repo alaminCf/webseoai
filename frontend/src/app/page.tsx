@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Menu,
   Sparkles,
@@ -44,8 +44,41 @@ export default function DashboardPage() {
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(false);
   const [websites, setWebsites] = useState<Website[]>([]);
   const [selectedWebsite, setSelectedWebsite] = useState<Website | null>(null);
+  const pendingWebsiteIdRef = useRef<number | null>(null);
   const [isLoadingWebsites, setIsLoadingWebsites] = useState<boolean>(false);
   const [showArchived, setShowArchived] = useState<boolean>(false);
+
+  // Handle OAuth redirect return params (e.g. /?tab=performance&gsc=connected&website_id=3)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const tab = params.get('tab');
+    const gsc = params.get('gsc');
+    const reason = params.get('reason');
+    const websiteIdParam = params.get('website_id');
+
+    const validTabs = ['overview', 'websites', 'action_plan', 'audits', 'content', 'performance', 'autopilot', 'team', 'settings'];
+    if (tab && validTabs.includes(tab)) {
+      setActiveTab(tab);
+    }
+
+    if (websiteIdParam) {
+      const parsedId = parseInt(websiteIdParam, 10);
+      if (!Number.isNaN(parsedId)) {
+        pendingWebsiteIdRef.current = parsedId;
+      }
+    }
+
+    if (gsc === 'connected') {
+      toast.success('Google Search Console connected! Click "Sync Data" to pull live search analytics.');
+    } else if (gsc === 'error') {
+      toast.error(reason || 'Google Search Console authorization failed.');
+    }
+
+    if (tab || gsc || websiteIdParam || reason) {
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, [toast]);
 
   // Modals state
   const [isOnboardingModalOpen, setIsOnboardingModalOpen] = useState<boolean>(false);
@@ -63,6 +96,11 @@ export default function DashboardPage() {
       if (res.success && res.data) {
         setWebsites(res.data);
         setSelectedWebsite((prev) => {
+          if (pendingWebsiteIdRef.current !== null) {
+            const target = res.data!.find((w) => w.id === pendingWebsiteIdRef.current);
+            pendingWebsiteIdRef.current = null;
+            if (target) return target;
+          }
           if (prev && res.data!.some((w) => w.id === prev.id)) {
             return res.data!.find((w) => w.id === prev.id) || prev;
           }

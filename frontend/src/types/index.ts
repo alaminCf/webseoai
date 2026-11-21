@@ -469,6 +469,8 @@ export interface SearchConsoleStatus {
   last_synced_at: string | null;
   last_error: string | null;
   is_sandbox: boolean;
+  oauth_mode?: 'live' | 'sandbox';
+  redirect_uri?: string;
   latest_sync_log?: {
     id: number;
     rows_synced: number;
