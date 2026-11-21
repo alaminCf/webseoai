@@ -103,8 +103,9 @@ export function SearchPerformanceView({
       if (res.success && res.data) {
         const url = res.data.authorization_url;
         if (url.includes('/sandbox-callback?')) {
-          // Trigger local sandbox callback directly
-          const callbackRes = await api.get(url.replace(/^https?:\/\/[^\/]+/, ''));
+          // Trigger sandbox callback directly (strip origin and /api/v1 prefix so api.get doesn't double-prefix)
+          const relativeEndpoint = url.replace(/^https?:\/\/[^/]+/, '').replace(/^\/api\/v1/, '');
+          const callbackRes = await api.get(relativeEndpoint);
           if (callbackRes.success) {
             toast.success('Connected to Google Search Console (Verified Property).');
             loadData();
