@@ -33,6 +33,7 @@ Route::prefix('v1')->group(function () {
             'success' => true,
             'status' => 'healthy',
             'platform' => 'Web SEO AI',
+            'database' => config('database.default'),
             'version' => '1.0.0',
             'timestamp' => now()->toIso8601String(),
         ]);
