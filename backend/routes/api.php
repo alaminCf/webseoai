@@ -29,11 +29,22 @@ use Illuminate\Support\Facades\Route;
 Route::prefix('v1')->group(function () {
     // System Health Check
     Route::get('/health', function () {
+        $dbConnected = false;
+        $usersCount = null;
+        try {
+            $usersCount = \App\Models\User::count();
+            $dbConnected = true;
+        } catch (\Throwable) {
+            $dbConnected = false;
+        }
+
         return response()->json([
             'success' => true,
-            'status' => 'healthy',
+            'status' => $dbConnected ? 'healthy' : 'degraded',
             'platform' => 'Web SEO AI',
             'database' => config('database.default'),
+            'db_connected' => $dbConnected,
+            'users_count' => $usersCount,
             'version' => '1.0.0',
             'timestamp' => now()->toIso8601String(),
         ]);

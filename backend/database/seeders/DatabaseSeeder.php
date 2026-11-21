@@ -119,14 +119,16 @@ class DatabaseSeeder extends Seeder
             ]
         );
 
-        // Audit Log Entry
-        AuditLog::record(
-            $agencyOrg->id,
-            $owner->id,
-            'seeder.initialized',
-            $agencyOrg,
-            null,
-            ['websites' => 2, 'members' => 2]
-        );
+        // Audit Log Entry (idempotent across repeated container boots)
+        if (!AuditLog::where('organization_id', $agencyOrg->id)->where('action', 'seeder.initialized')->exists()) {
+            AuditLog::record(
+                $agencyOrg->id,
+                $owner->id,
+                'seeder.initialized',
+                $agencyOrg,
+                null,
+                ['websites' => 2, 'members' => 2]
+            );
+        }
     }
 }
