@@ -62,16 +62,19 @@ export default function DashboardPage() {
       const res = await api.get<Website[]>(`/websites?archived=${showArchived ? 1 : 0}`);
       if (res.success && res.data) {
         setWebsites(res.data);
-        if (!selectedWebsite && res.data.length > 0) {
-          setSelectedWebsite(res.data[0]);
-        }
+        setSelectedWebsite((prev) => {
+          if (prev && res.data!.some((w) => w.id === prev.id)) {
+            return res.data!.find((w) => w.id === prev.id) || prev;
+          }
+          return res.data!.length > 0 ? res.data![0] : null;
+        });
       } else {
         toast.error(res.error?.message || 'Could not load websites.');
       }
     } finally {
       setIsLoadingWebsites(false);
     }
-  }, [currentOrganization, showArchived, selectedWebsite, toast]);
+  }, [currentOrganization, showArchived, toast]);
 
   useEffect(() => {
     if (user && currentOrganization) {

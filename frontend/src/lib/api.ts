@@ -90,30 +90,53 @@ class ApiClient {
       ...(options.headers as Record<string, string>),
     };
 
-    try {
-      const res = await fetch(url, {
-        ...options,
-        headers,
-      });
+    const isIdempotent = !options.method || options.method === 'GET';
+    const maxAttempts = isIdempotent ? 2 : 1;
 
-      const data: ApiResponse<T> = await res.json().catch(() => ({
-        success: false,
-        error: {
-          code: 'NETWORK_OR_PARSING_ERROR',
-          message: `Server returned HTTP ${res.status} with invalid JSON.`,
-        },
-      }));
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const res = await fetch(url, {
+          ...options,
+          headers,
+        });
 
-      return data;
-    } catch (err: unknown) {
-      return {
-        success: false,
-        error: {
-          code: 'FETCH_FAILED',
-          message: err instanceof Error ? err.message : 'Could not connect to the backend server.',
-        },
-      };
+        // Retry once on transient cold-start 502/503/504 for GET requests
+        if (isIdempotent && attempt < maxAttempts && [502, 503, 504].includes(res.status)) {
+          await new Promise((r) => setTimeout(r, 800));
+          continue;
+        }
+
+        const data: ApiResponse<T> = await res.json().catch(() => ({
+          success: false,
+          error: {
+            code: 'NETWORK_OR_PARSING_ERROR',
+            message: `Server returned HTTP ${res.status} with invalid JSON.`,
+          },
+        }));
+
+        return data;
+      } catch (err: unknown) {
+        if (attempt < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 800));
+          continue;
+        }
+        return {
+          success: false,
+          error: {
+            code: 'FETCH_FAILED',
+            message: err instanceof Error ? err.message : 'Could not connect to the backend server.',
+          },
+        };
+      }
     }
+
+    return {
+      success: false,
+      error: {
+        code: 'FETCH_FAILED',
+        message: 'Could not connect to the backend server.',
+      },
+    };
   }
 
   public get<T>(endpoint: string): Promise<ApiResponse<T>> {

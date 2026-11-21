@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback, useMemo } from 'react';
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
 
 interface Toast {
@@ -22,25 +22,37 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
 
   const addToast = useCallback((type: 'success' | 'error' | 'info', message: string) => {
     const id = Math.random().toString(36).substring(2, 9);
-    setToasts((prev) => [...prev, { id, type, message }]);
+    setToasts((prev) => {
+      // Avoid stacking identical active messages
+      if (prev.some((t) => t.type === type && t.message === message)) {
+        return prev;
+      }
+      // Keep at most 4 visible toasts
+      const trimmed = prev.length >= 4 ? prev.slice(prev.length - 3) : prev;
+      return [...trimmed, { id, type, message }];
+    });
 
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 4500);
   }, []);
 
-  const removeToast = (id: string) => {
+  const removeToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
-  };
+  }, []);
+
+  // Stable memoized context value — prevents cascading re-renders & useEffect loops!
+  const contextValue = useMemo<ToastContextType>(
+    () => ({
+      success: (msg: string) => addToast('success', msg),
+      error: (msg: string) => addToast('error', msg),
+      info: (msg: string) => addToast('info', msg),
+    }),
+    [addToast]
+  );
 
   return (
-    <ToastContext.Provider
-      value={{
-        success: (msg) => addToast('success', msg),
-        error: (msg) => addToast('error', msg),
-        info: (msg) => addToast('info', msg),
-      }}
-    >
+    <ToastContext.Provider value={contextValue}>
       {children}
       <div className="fixed bottom-5 right-5 z-50 flex flex-col gap-2 max-w-sm w-full pointer-events-none">
         {toasts.map((toast) => (
