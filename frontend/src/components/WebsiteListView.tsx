@@ -31,6 +31,7 @@ interface WebsiteListViewProps {
   onDeleteWebsite: (websiteId: number) => void;
   showArchived: boolean;
   setShowArchived: (show: boolean) => void;
+  onSelectAuditWebsite?: (website: Website) => void;
 }
 
 export function WebsiteListView({
@@ -44,6 +45,7 @@ export function WebsiteListView({
   onDeleteWebsite,
   showArchived,
   setShowArchived,
+  onSelectAuditWebsite,
 }: WebsiteListViewProps) {
   const [search, setSearch] = useState('');
   const [platformFilter, setPlatformFilter] = useState<string>('all');
@@ -287,6 +289,13 @@ export function WebsiteListView({
               {/* Action Buttons Row */}
               <div className="flex items-center justify-between pt-2">
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => onSelectAuditWebsite?.(website)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 rounded-xl transition shadow"
+                  >
+                    <Activity className="w-3.5 h-3.5" />
+                    Audit & Crawl
+                  </button>
                   <button
                     onClick={() => onOpenIntegrationsModal(website)}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-zinc-200 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-xl transition"

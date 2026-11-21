@@ -163,6 +163,17 @@ class OrganizationController extends Controller
             return $this->error('Only the owner can assign another owner.', 'INSUFFICIENT_PERMISSIONS', null, 403);
         }
 
+        // Quota check: team seats
+        try {
+            app(\App\Domain\Billing\QuotaEnforcementService::class)->assertCanAddTeamMember($org);
+        } catch (\App\Domain\Billing\Exceptions\QuotaExceededException $e) {
+            return $this->error($e->getMessage(), 'QUOTA_EXCEEDED', [
+                'quota_type' => $e->getQuotaType(),
+                'current' => $e->getCurrentUsage(),
+                'limit' => $e->getLimit(),
+            ], 403);
+        }
+
         return DB::transaction(function () use ($validated, $org, $request) {
             // Find or create user for the email
             $targetUser = User::where('email', $validated['email'])->first();
@@ -309,5 +320,56 @@ class OrganizationController extends Controller
         $targetMember->delete();
 
         return $this->success(['message' => 'Member removed successfully.']);
+    }
+
+    /**
+     * Delete entire organization and all tenant data (GDPR / account deletion workflow).
+     * Strictly restricted to organization OWNER with confirmation phrase.
+     */
+    public function destroyOrganization(Request $request): JsonResponse
+    {
+        /** @var Organization $org */
+        $org = $request->attributes->get('organization');
+        /** @var OrganizationMember $currentMembership */
+        $currentMembership = $request->attributes->get('membership');
+
+        if (!$currentMembership->isOwner()) {
+            return $this->error('Only the organization owner can permanently delete an organization.', 'INSUFFICIENT_PERMISSIONS', null, 403);
+        }
+
+        $validated = $request->validate([
+            'confirmation' => ['required', 'string'],
+        ]);
+
+        if (strtolower(trim($validated['confirmation'])) !== strtolower(trim($org->name))) {
+            return $this->error('Confirmation string does not match organization name.', 'INVALID_CONFIRMATION', null, 422);
+        }
+
+        return DB::transaction(function () use ($org, $request) {
+            AuditLog::record(
+                $org->id,
+                $request->user()->id,
+                'organization.deleted',
+                $org,
+                ['name' => $org->name, 'slug' => $org->slug],
+                null,
+                $request
+            );
+
+            // Cascade delete websites and all related child records
+            foreach ($org->websites as $site) {
+                $site->delete();
+            }
+
+            // Remove all client workspaces, subscriptions, members
+            $org->clientWorkspaces()->delete();
+            $org->subscriptions()->delete();
+            $org->members()->delete();
+            $org->delete();
+
+            return $this->success([
+                'message' => 'Organization and all associated records have been permanently deleted.',
+            ]);
+        });
     }
 }

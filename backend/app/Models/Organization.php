@@ -48,4 +48,44 @@ class Organization extends Model
     {
         return $this->hasMany(AuditLog::class);
     }
+
+    public function clientWorkspaces(): HasMany
+    {
+        return $this->hasMany(ClientWorkspace::class);
+    }
+
+    public function subscriptions(): HasMany
+    {
+        return $this->hasMany(Subscription::class);
+    }
+
+    public function subscription(): \Illuminate\Database\Eloquent\Relations\HasOne
+    {
+        return $this->hasOne(Subscription::class)->latestOfMany();
+    }
+
+    public function clientApprovalRequests(): HasMany
+    {
+        return $this->hasMany(ClientApprovalRequest::class);
+    }
+
+    public function getEffectivePlan(): array
+    {
+        $planId = $this->subscription?->plan_id ?? $this->billing_plan ?? 'starter';
+        $plans = config('saas.plans', []);
+        return $plans[$planId] ?? $plans['starter'] ?? [];
+    }
+
+    public function getWhiteLabelSettings(): array
+    {
+        $settings = $this->settings ?? [];
+        return $settings['white_label'] ?? [
+            'brand_name' => $this->name,
+            'logo_url' => null,
+            'primary_color' => '#10b981', // emerald
+            'contact_email' => null,
+            'footer_text' => 'Confidential SEO Strategy & Technical Audit Report',
+            'remove_platform_branding' => false,
+        ];
+    }
 }

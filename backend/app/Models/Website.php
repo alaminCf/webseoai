@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Support\Str;
 
 class Website extends Model
@@ -35,6 +36,7 @@ class Website extends Model
 
     protected $fillable = [
         'organization_id',
+        'client_workspace_id',
         'name',
         'domain',
         'target_url',
@@ -82,6 +84,76 @@ class Website extends Model
         return $this->hasMany(WebsiteIntegration::class);
     }
 
+    public function contextProfile(): \Illuminate\Database\Eloquent\Relations\HasOne
+    {
+        return $this->hasOne(WebsiteContextProfile::class);
+    }
+
+    public function aiRecommendations(): HasMany
+    {
+        return $this->hasMany(AiRecommendation::class);
+    }
+
+    public function contentBriefs(): HasMany
+    {
+        return $this->hasMany(ContentBrief::class);
+    }
+
+    public function contentArticles(): HasMany
+    {
+        return $this->hasMany(ContentArticle::class);
+    }
+
+    public function searchSyncLogs(): HasMany
+    {
+        return $this->hasMany(SearchConsoleSyncLog::class);
+    }
+
+    public function searchPerformanceRecords(): HasMany
+    {
+        return $this->hasMany(SearchPerformanceRecord::class);
+    }
+
+    public function searchOpportunities(): HasMany
+    {
+        return $this->hasMany(SearchOpportunity::class);
+    }
+
+    public function keywordRecords(): HasMany
+    {
+        return $this->hasMany(KeywordResearchRecord::class);
+    }
+
+    public function gscIntegration(): HasOne
+    {
+        return $this->hasOne(WebsiteIntegration::class)->where('provider', WebsiteIntegration::PROVIDER_GSC);
+    }
+
+    public function cmsSnapshots(): HasMany
+    {
+        return $this->hasMany(CmsSnapshot::class);
+    }
+
+    public function cmsChangeRequests(): HasMany
+    {
+        return $this->hasMany(CmsChangeRequest::class);
+    }
+
+    public function automationRules(): HasMany
+    {
+        return $this->hasMany(AutomationRule::class);
+    }
+
+    public function workflowRuns(): HasMany
+    {
+        return $this->hasMany(WorkflowRun::class);
+    }
+
+    public function workflowApprovals(): HasMany
+    {
+        return $this->hasMany(WorkflowApproval::class);
+    }
+
     public function scopeActive(Builder $query): Builder
     {
         return $query->where('is_archived', false);
@@ -116,5 +188,56 @@ class Website extends Model
             'filename' => sprintf('web-seo-ai-%s.txt', substr($this->verification_token, -12)),
             'content' => $this->verification_token,
         ];
+    }
+
+    public function clientWorkspace(): BelongsTo
+    {
+        return $this->belongsTo(ClientWorkspace::class);
+    }
+
+    public function permissions(): HasMany
+    {
+        return $this->hasMany(WebsitePermission::class);
+    }
+
+    public function clientApprovalRequests(): HasMany
+    {
+        return $this->hasMany(ClientApprovalRequest::class);
+    }
+
+    public function userCan(User $user, string $action): bool
+    {
+        // 1. Owners and Admins of the organization always have full access
+        $membership = OrganizationMember::where('organization_id', $this->organization_id)
+            ->where('user_id', $user->id)
+            ->first();
+
+        if (!$membership) {
+            return false;
+        }
+
+        if ($membership->isAdmin()) {
+            return true;
+        }
+
+        // 2. Check granular website permission if defined
+        $perm = $this->permissions()->where('user_id', $user->id)->first();
+        if ($perm) {
+            return match ($action) {
+                'view' => $perm->can_view,
+                'edit' => $perm->can_edit,
+                'publish' => $perm->can_publish,
+                'approve' => $perm->can_approve,
+                default => false,
+            };
+        }
+
+        // 3. Fallback to organization role defaults
+        return match ($action) {
+            'view' => true,
+            'edit' => in_array($membership->role, [OrganizationMember::ROLE_SEO_MANAGER, OrganizationMember::ROLE_EDITOR], true),
+            'publish', 'approve' => $membership->role === OrganizationMember::ROLE_SEO_MANAGER,
+            default => false,
+        };
     }
 }

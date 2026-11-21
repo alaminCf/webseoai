@@ -63,6 +63,30 @@ class WebsiteController extends Controller
             return $this->error('Your role does not have permission to add websites.', 'INSUFFICIENT_PERMISSIONS', null, 403);
         }
 
+        // Auto-normalize domain and target_url so inputs like "example.com" or "https://example.com/" both work cleanly
+        $rawDomain = trim((string) $request->input('domain', ''));
+        $rawTargetUrl = trim((string) $request->input('target_url', ''));
+
+        if ($rawTargetUrl === '' && $rawDomain !== '') {
+            $rawTargetUrl = preg_match('#^https?://#i', $rawDomain)
+                ? $rawDomain
+                : 'https://' . ltrim($rawDomain, '/');
+        } elseif ($rawTargetUrl !== '' && !preg_match('#^https?://#i', $rawTargetUrl)) {
+            $rawTargetUrl = 'https://' . ltrim($rawTargetUrl, '/');
+        }
+
+        if ($rawDomain !== '' && preg_match('#^https?://#i', $rawDomain)) {
+            $parsedHost = parse_url($rawDomain, PHP_URL_HOST);
+            if ($parsedHost) {
+                $rawDomain = $parsedHost;
+            }
+        }
+
+        $request->merge([
+            'domain' => strtolower(rtrim($rawDomain, '/')),
+            'target_url' => rtrim($rawTargetUrl, '/'),
+        ]);
+
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
             'domain' => ['required', 'string', 'max:255'],
@@ -83,7 +107,23 @@ class WebsiteController extends Controller
             ->first();
 
         if ($existing) {
-            return $this->error('A website with this domain already exists in your organization.', 'WEBSITE_EXISTS', null, 422);
+            return $this->error(
+                'A website with this domain already exists in your organization.',
+                'WEBSITE_EXISTS',
+                ['existing_website' => $this->formatWebsite($existing, true)],
+                422
+            );
+        }
+
+        // Enforce SaaS plan website limits
+        try {
+            app(\App\Domain\Billing\QuotaEnforcementService::class)->assertCanAddWebsite($org);
+        } catch (\App\Domain\Billing\Exceptions\QuotaExceededException $e) {
+            return $this->error($e->getMessage(), 'QUOTA_EXCEEDED', [
+                'quota_type' => $e->getQuotaType(),
+                'current' => $e->getCurrentUsage(),
+                'limit' => $e->getLimit(),
+            ], 403);
         }
 
         $website = Website::create([

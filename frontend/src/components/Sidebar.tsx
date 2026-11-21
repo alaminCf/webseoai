@@ -2,19 +2,21 @@
 
 import React, { useState } from 'react';
 import {
+  LayoutDashboard,
   Globe,
+  Sparkles,
   Activity,
   FileText,
-  CheckSquare,
   BarChart3,
-  Clock,
+  Zap,
   Users,
+  Settings,
   LogOut,
   ChevronDown,
   Plus,
   Shield,
+  Clock,
   Layers,
-  Sparkles,
 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 
@@ -36,14 +38,17 @@ export function Sidebar({
   const { user, organizations, currentOrganization, switchOrganization, logout } = useAuth();
   const [orgDropdownOpen, setOrgDropdownOpen] = useState(false);
 
+  // 9 intuitive, task-oriented sections as designed in Step 4
   const navItems = [
-    { id: 'websites', label: 'Websites', icon: Globe },
-    { id: 'audits', label: 'Technical Audits', icon: Activity, badge: 'Phase 3' },
-    { id: 'content', label: 'Content & Meta', icon: FileText, badge: 'Phase 4' },
-    { id: 'approvals', label: 'Approvals Board', icon: CheckSquare, badge: 'Phase 5' },
-    { id: 'analytics', label: 'Search Console', icon: BarChart3, badge: 'Phase 6' },
-    { id: 'activity', label: 'Audit Trail', icon: Clock },
-    { id: 'team', label: 'Team & Roles', icon: Users },
+    { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+    { id: 'websites', label: 'My Websites', icon: Globe },
+    { id: 'action_plan', label: 'SEO Action Plan', icon: Sparkles, badge: 'AI' },
+    { id: 'audits', label: 'Site Audit', icon: Activity },
+    { id: 'content', label: 'Content Studio', icon: FileText },
+    { id: 'performance', label: 'Performance', icon: BarChart3 },
+    { id: 'autopilot', label: 'Autopilot', icon: Zap },
+    { id: 'team', label: 'Clients & Team', icon: Users },
+    { id: 'settings', label: 'Settings', icon: Settings },
   ];
 
   return (
@@ -72,10 +77,10 @@ export function Sidebar({
               <div className="text-sm font-bold tracking-tight text-zinc-100 flex items-center gap-1.5">
                 Web SEO AI
                 <span className="text-[10px] font-semibold tracking-wider uppercase px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700">
-                  v1.0
+                  v2.0
                 </span>
               </div>
-              <div className="text-[11px] text-zinc-400">Techboloy Agency Hub</div>
+              <div className="text-[11px] text-zinc-400">Autonomous SEO Platform</div>
             </div>
           </div>
         </div>
@@ -142,7 +147,7 @@ export function Sidebar({
           </div>
         </div>
 
-        {/* Navigation Items */}
+        {/* 9 Intuitive Navigation Items */}
         <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
           {navItems.map((item) => {
             const Icon = item.icon;
@@ -154,22 +159,24 @@ export function Sidebar({
                   setActiveTab(item.id);
                   onClose();
                 }}
-                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-medium transition ${
+                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-xs font-medium transition ${
                   isActive
-                    ? 'bg-zinc-900 text-zinc-100 border border-zinc-800 shadow-sm'
-                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/50'
+                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-900/60'
                 }`}
               >
                 <div className="flex items-center gap-3">
-                  <Icon
-                    className={`w-4 h-4 ${
-                      isActive ? 'text-emerald-400' : 'text-zinc-400'
-                    }`}
-                  />
+                  <Icon className={`w-4 h-4 ${isActive ? 'text-emerald-400' : 'text-zinc-400'}`} />
                   <span>{item.label}</span>
                 </div>
                 {item.badge && (
-                  <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-zinc-800/80 text-zinc-400 border border-zinc-700/60">
+                  <span
+                    className={`text-[9px] font-bold px-1.5 py-0.5 rounded-md uppercase tracking-wide ${
+                      isActive
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                        : 'bg-zinc-800 text-zinc-400'
+                    }`}
+                  >
                     {item.badge}
                   </span>
                 )}
@@ -178,11 +185,11 @@ export function Sidebar({
           })}
         </nav>
 
-        {/* User Footer Profile */}
-        <div className="p-4 border-t border-zinc-800/80 bg-zinc-950/80">
+        {/* User Footer & Logout */}
+        <div className="p-4 border-t border-zinc-800/80">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5 truncate">
-              <div className="w-8 h-8 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-xs font-semibold text-zinc-300 shrink-0">
+              <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-semibold text-zinc-200 shrink-0">
                 {user?.name?.charAt(0) || 'U'}
               </div>
               <div className="truncate">
@@ -192,8 +199,8 @@ export function Sidebar({
             </div>
             <button
               onClick={logout}
-              title="Logout"
-              className="p-1.5 text-zinc-400 hover:text-rose-400 hover:bg-zinc-900 rounded-lg transition"
+              title="Sign out"
+              className="p-1.5 text-zinc-400 hover:text-red-400 hover:bg-zinc-900 rounded-lg transition"
             >
               <LogOut className="w-4 h-4" />
             </button>

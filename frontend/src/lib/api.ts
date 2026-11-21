@@ -1,6 +1,6 @@
 import { ApiResponse } from '@/types';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001/api/v1';
 
 class ApiClient {
   private token: string | null = null;
@@ -115,6 +115,13 @@ class ApiClient {
   public post<T>(endpoint: string, body?: unknown): Promise<ApiResponse<T>> {
     return this.request<T>(endpoint, {
       method: 'POST',
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  }
+
+  public put<T>(endpoint: string, body?: unknown): Promise<ApiResponse<T>> {
+    return this.request<T>(endpoint, {
+      method: 'PUT',
       body: body ? JSON.stringify(body) : undefined,
     });
   }

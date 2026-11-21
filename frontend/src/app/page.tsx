@@ -20,9 +20,16 @@ import { api } from '@/lib/api';
 import { Website } from '@/types';
 import { AuthView } from '@/components/AuthView';
 import { Sidebar } from '@/components/Sidebar';
+import { OverviewView } from '@/components/OverviewView';
 import { WebsiteListView } from '@/components/WebsiteListView';
+import { SeoActionPlanView } from '@/components/SeoActionPlanView';
+import { AuditOverviewView } from '@/components/AuditOverviewView';
+import { ContentStudioView } from '@/components/ContentStudioView';
+import { UnifiedPerformanceView } from '@/components/UnifiedPerformanceView';
+import { AutopilotView } from '@/components/AutopilotView';
+import { UnifiedSettingsView } from '@/components/UnifiedSettingsView';
 import { TeamView } from '@/components/TeamView';
-import { ActivityView } from '@/components/ActivityView';
+import { OnboardingWizardModal } from '@/components/OnboardingWizardModal';
 import { AddWebsiteModal } from '@/components/AddWebsiteModal';
 import { VerifyWebsiteModal } from '@/components/VerifyWebsiteModal';
 import { IntegrationsModal } from '@/components/IntegrationsModal';
@@ -32,7 +39,8 @@ export default function DashboardPage() {
   const { user, currentOrganization, isLoading: authLoading } = useAuth();
   const toast = useToast();
 
-  const [activeTab, setActiveTab] = useState<string>('websites');
+  // Active navigation tab (default to overview)
+  const [activeTab, setActiveTab] = useState<string>('overview');
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(false);
   const [websites, setWebsites] = useState<Website[]>([]);
   const [selectedWebsite, setSelectedWebsite] = useState<Website | null>(null);
@@ -40,10 +48,11 @@ export default function DashboardPage() {
   const [showArchived, setShowArchived] = useState<boolean>(false);
 
   // Modals state
-  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-  const [isVerifyModalOpen, setIsVerifyModalOpen] = useState(false);
-  const [isIntegrationsModalOpen, setIsIntegrationsModalOpen] = useState(false);
-  const [isCreateOrgModalOpen, setIsCreateOrgModalOpen] = useState(false);
+  const [isOnboardingModalOpen, setIsOnboardingModalOpen] = useState<boolean>(false);
+  const [isAddModalOpen, setIsAddModalOpen] = useState<boolean>(false);
+  const [isVerifyModalOpen, setIsVerifyModalOpen] = useState<boolean>(false);
+  const [isIntegrationsModalOpen, setIsIntegrationsModalOpen] = useState<boolean>(false);
+  const [isCreateOrgModalOpen, setIsCreateOrgModalOpen] = useState<boolean>(false);
   const [activeModalWebsite, setActiveModalWebsite] = useState<Website | null>(null);
 
   const loadWebsites = useCallback(async () => {
@@ -132,7 +141,7 @@ export default function DashboardPage() {
 
   return (
     <div className="min-h-screen bg-black flex">
-      {/* Sidebar */}
+      {/* 9-Section Sidebar */}
       <Sidebar
         activeTab={activeTab}
         setActiveTab={setActiveTab}
@@ -159,7 +168,7 @@ export default function DashboardPage() {
               <span className="text-zinc-600">/</span>
               <span className="font-bold text-zinc-100 flex items-center gap-1.5">
                 <Building2 className="w-3.5 h-3.5 text-emerald-400" />
-                {currentOrganization?.name || 'Default Org'}
+                {currentOrganization?.name || 'Default Workspace'}
               </span>
             </div>
           </div>
@@ -187,22 +196,33 @@ export default function DashboardPage() {
             )}
 
             <button
-              onClick={() => setIsAddModalOpen(true)}
+              onClick={() => setIsOnboardingModalOpen(true)}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 rounded-xl shadow transition"
             >
               <Plus className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Add Website</span>
+              <span className="hidden sm:inline">Connect Website</span>
             </button>
           </div>
         </header>
 
         {/* Tab Main Viewport */}
         <main className="flex-1 p-4 sm:p-8 max-w-7xl w-full mx-auto">
+          {/* SECTION 1: OVERVIEW (Main Executive Dashboard) */}
+          {activeTab === 'overview' && (
+            <OverviewView
+              website={selectedWebsite}
+              onNavigate={(tab) => setActiveTab(tab)}
+              onStartOnboarding={() => setIsOnboardingModalOpen(true)}
+              onRunAudit={() => setActiveTab('audits')}
+            />
+          )}
+
+          {/* SECTION 2: MY WEBSITES */}
           {activeTab === 'websites' && (
             <WebsiteListView
               websites={websites}
               isLoading={isLoadingWebsites}
-              onOpenAddModal={() => setIsAddModalOpen(true)}
+              onOpenAddModal={() => setIsOnboardingModalOpen(true)}
               onOpenVerifyModal={(site) => {
                 setActiveModalWebsite(site);
                 setIsVerifyModalOpen(true);
@@ -216,46 +236,78 @@ export default function DashboardPage() {
               onDeleteWebsite={handleDelete}
               showArchived={showArchived}
               setShowArchived={setShowArchived}
+              onSelectAuditWebsite={(site) => {
+                setSelectedWebsite(site);
+                setActiveTab('overview');
+              }}
             />
           )}
 
-          {activeTab === 'team' && <TeamView />}
+          {/* SECTION 3: SEO ACTION PLAN */}
+          {activeTab === 'action_plan' && (
+            <SeoActionPlanView
+              website={selectedWebsite}
+              onNavigateToContent={() => setActiveTab('content')}
+              onNavigateToAudit={() => setActiveTab('audits')}
+            />
+          )}
 
-          {activeTab === 'activity' && <ActivityView />}
+          {/* SECTION 4: SITE AUDIT */}
+          {activeTab === 'audits' && (
+            <AuditOverviewView
+              website={selectedWebsite}
+              onRefreshWebsites={loadWebsites}
+              onNavigateToStrategist={() => setActiveTab('action_plan')}
+            />
+          )}
 
-          {/* Upcoming Phase Placeholders */}
-          {['audits', 'content', 'approvals', 'analytics'].includes(activeTab) && (
-            <div className="p-12 border border-zinc-800/80 rounded-2xl bg-zinc-950 text-center max-w-xl mx-auto mt-12">
-              <div className="w-12 h-12 rounded-2xl bg-emerald-950/40 border border-emerald-800/40 text-emerald-400 mx-auto mb-4 flex items-center justify-center font-bold">
-                <Sparkles className="w-6 h-6" />
-              </div>
-              <h3 className="text-base font-bold text-zinc-100 mb-1 capitalize">
-                {activeTab === 'audits' && 'Phase 3: Technical SEO Crawler & Audit Engine'}
-                {activeTab === 'content' && 'Phase 4: AI Content & Meta Tag Generator'}
-                {activeTab === 'approvals' && 'Phase 5: Recommendation & Human Approval Board'}
-                {activeTab === 'analytics' && 'Phase 6: Google Search Console Sync & Analytics'}
-              </h3>
-              <p className="text-xs text-zinc-400 leading-relaxed mb-6">
-                Phase 1 Core SaaS Foundation (Auth, Multi-Tenant Workspaces, RBAC, Website Registry, Encrypted Integrations, and Audit Trail) is complete. This module is queued for execution in the upcoming phase.
-              </p>
-              <button
-                onClick={() => setActiveTab('websites')}
-                className="px-4 py-2 text-xs font-semibold text-zinc-300 bg-zinc-900 hover:bg-zinc-800 rounded-xl border border-zinc-800 transition"
-              >
-                Back to Website Registry
-              </button>
-            </div>
+          {/* SECTION 5: CONTENT STUDIO */}
+          {activeTab === 'content' && (
+            <ContentStudioView website={selectedWebsite} />
+          )}
+
+          {/* SECTION 6: PERFORMANCE */}
+          {activeTab === 'performance' && (
+            <UnifiedPerformanceView
+              website={selectedWebsite}
+              onNavigateToContent={() => setActiveTab('content')}
+            />
+          )}
+
+          {/* SECTION 7: AUTOPILOT */}
+          {activeTab === 'autopilot' && (
+            <AutopilotView
+              website={selectedWebsite}
+              onNavigateToApprovals={() => setActiveTab('action_plan')}
+            />
+          )}
+
+          {/* SECTION 8: CLIENTS & TEAM */}
+          {activeTab === 'team' && (
+            <TeamView />
+          )}
+
+          {/* SECTION 9: SETTINGS & BILLING */}
+          {activeTab === 'settings' && (
+            <UnifiedSettingsView
+              selectedWebsite={selectedWebsite}
+            />
           )}
         </main>
       </div>
 
-      {/* Interactive Modals */}
-      <AddWebsiteModal
-        isOpen={isAddModalOpen}
-        onClose={() => setIsAddModalOpen(false)}
-        onSuccess={() => loadWebsites()}
+      {/* Guided Onboarding Wizard Modal */}
+      <OnboardingWizardModal
+        isOpen={isOnboardingModalOpen}
+        onClose={() => setIsOnboardingModalOpen(false)}
+        onCompleted={(newSite) => {
+          loadWebsites();
+          setSelectedWebsite(newSite);
+          setActiveTab('overview');
+        }}
       />
 
+      {/* Verification & Integration Modals */}
       <VerifyWebsiteModal
         website={activeModalWebsite}
         isOpen={isVerifyModalOpen}
