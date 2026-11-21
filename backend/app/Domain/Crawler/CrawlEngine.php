@@ -466,6 +466,7 @@ class CrawlEngine
         $startTime = microtime(true);
         $redirectHops = [];
         $currentUrl = $url;
+        $seenRawUrls = [$currentUrl => true];
         $maxRedirects = 5;
 
         try {
@@ -487,26 +488,27 @@ class CrawlEngine
                         break;
                     }
 
-                    $nextUrl = UrlNormalizer::normalize($location, $currentUrl)
-                        ?? UrlNormalizer::resolveRelativeUrl($location, $currentUrl);
+                    // Preserve exact redirect target (including WordPress trailing slash) for HTTP fetch
+                    $rawNextUrl = UrlNormalizer::resolveRelativeUrl(trim($location), $currentUrl);
+                    $normalizedNext = UrlNormalizer::normalize($location, $currentUrl);
 
                     $redirectHops[] = [
                         'from' => $currentUrl,
                         'status' => $status,
-                        'to' => $nextUrl ?? $location,
+                        'to' => $rawNextUrl ?? $location,
                     ];
 
-                    if (!$nextUrl || !UrlNormalizer::isInternal($nextUrl, $rootDomain)) {
-                        // Stop following if redirecting outside target domain
+                    if (!$rawNextUrl || !UrlNormalizer::isInternal($rawNextUrl, $rootDomain)) {
                         break;
                     }
 
-                    // Prevent redirect loops
-                    if ($nextUrl === $currentUrl || $hop === $maxRedirects) {
+                    // Prevent real redirect loops (compare exact raw URLs, not slash-stripped normalized URLs)
+                    if (isset($seenRawUrls[$rawNextUrl]) || $hop === $maxRedirects) {
                         break;
                     }
 
-                    $currentUrl = $nextUrl;
+                    $seenRawUrls[$rawNextUrl] = true;
+                    $currentUrl = $rawNextUrl;
                     continue;
                 }
 
