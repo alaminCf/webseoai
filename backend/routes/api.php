@@ -17,6 +17,7 @@ use App\Http\Controllers\Api\V1\WorkflowAutomationController;
 use App\Http\Controllers\Api\V1\WebsiteIntegrationController;
 use App\Http\Controllers\Api\V1\BillingController;
 use App\Http\Controllers\Api\V1\ClientManagementController;
+use App\Http\Controllers\Api\V1\CompetitorAnalysisController;
 use App\Http\Controllers\Api\V1\WhiteLabelReportController;
 use Illuminate\Support\Facades\Route;
 
@@ -248,6 +249,45 @@ Route::prefix('v1')->group(function () {
             // Phase 7: Organization & Account Deletion Workflow
             Route::post('/organizations/current/delete', [OrganizationController::class, 'destroyOrganization'])
                 ->middleware('org.role:owner');
+
+            // Phase 8: Competitor Analysis Module
+            Route::prefix('/websites/{website}/competitors')->group(function () {
+                Route::get('/providers', [CompetitorAnalysisController::class, 'providers']);
+                Route::get('/overview', [CompetitorAnalysisController::class, 'overview']);
+                Route::get('/', [CompetitorAnalysisController::class, 'index']);
+                Route::post('/', [CompetitorAnalysisController::class, 'store'])->middleware('org.role:editor');
+                Route::patch('/{competitor}', [CompetitorAnalysisController::class, 'update'])->middleware('org.role:editor');
+                Route::delete('/{competitor}', [CompetitorAnalysisController::class, 'destroy'])->middleware('org.role:editor');
+
+                Route::get('/discoveries', [CompetitorAnalysisController::class, 'listDiscoveries']);
+                Route::post('/discover', [CompetitorAnalysisController::class, 'discover'])->middleware(['org.role:seo_manager', 'throttle:30,1']);
+                Route::post('/discoveries/{run}/confirm', [CompetitorAnalysisController::class, 'confirmDiscovery'])->middleware('org.role:editor');
+
+                Route::post('/analyze', [CompetitorAnalysisController::class, 'launchAnalysis'])->middleware(['org.role:seo_manager', 'throttle:20,1']);
+                Route::get('/jobs', [CompetitorAnalysisController::class, 'listJobs']);
+                Route::get('/comparison', [CompetitorAnalysisController::class, 'comparison']);
+
+                Route::get('/keyword-gap', [CompetitorAnalysisController::class, 'keywordGap']);
+                Route::post('/keyword-gap/{keyword}/save-action', [CompetitorAnalysisController::class, 'saveKeywordToActionPlan'])->middleware('org.role:editor');
+
+                Route::get('/content-gap', [CompetitorAnalysisController::class, 'contentGap']);
+                Route::post('/content-gap/analyze', [CompetitorAnalysisController::class, 'analyzeContentGap'])->middleware('org.role:seo_manager');
+                Route::post('/content-gap/{gap}/send-to-studio', [CompetitorAnalysisController::class, 'sendContentGapToStudio'])->middleware('org.role:editor');
+
+                Route::get('/backlink-gap', [CompetitorAnalysisController::class, 'backlinkGap']);
+
+                Route::get('/serp/snapshots', [CompetitorAnalysisController::class, 'listSerpSnapshots']);
+                Route::post('/serp/analyze', [CompetitorAnalysisController::class, 'analyzeSerp'])->middleware(['org.role:seo_manager', 'throttle:30,1']);
+                Route::patch('/serp/snapshots/{snapshot}/monitor', [CompetitorAnalysisController::class, 'toggleSerpMonitor'])->middleware('org.role:editor');
+
+                Route::get('/strategy', [CompetitorAnalysisController::class, 'listStrategyReports']);
+                Route::post('/strategy/generate', [CompetitorAnalysisController::class, 'generateStrategy'])->middleware('org.role:seo_manager');
+                Route::post('/strategy/{report}/save-action', [CompetitorAnalysisController::class, 'saveStrategyAction'])->middleware('org.role:editor');
+
+                Route::get('/monitoring', [CompetitorAnalysisController::class, 'monitoring']);
+                Route::put('/monitoring', [CompetitorAnalysisController::class, 'updateMonitoring'])->middleware('org.role:seo_manager');
+                Route::post('/monitoring/run', [CompetitorAnalysisController::class, 'runMonitoring'])->middleware(['org.role:seo_manager', 'throttle:20,1']);
+            });
 
             // Audit Trail
             Route::get('/audit-logs', [AuditLogController::class, 'index']);

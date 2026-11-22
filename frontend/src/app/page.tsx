@@ -25,6 +25,7 @@ import { OverviewView } from '@/components/OverviewView';
 import { WebsiteListView } from '@/components/WebsiteListView';
 import { SeoActionPlanView } from '@/components/SeoActionPlanView';
 import { AuditOverviewView } from '@/components/AuditOverviewView';
+import { CompetitorAnalysisView } from '@/components/competitors/CompetitorAnalysisView';
 import { ContentStudioView } from '@/components/ContentStudioView';
 import { UnifiedPerformanceView } from '@/components/UnifiedPerformanceView';
 import { AutopilotView } from '@/components/AutopilotView';
@@ -58,7 +59,7 @@ export default function DashboardPage() {
     const reason = params.get('reason');
     const websiteIdParam = params.get('website_id');
 
-    const validTabs = ['overview', 'websites', 'action_plan', 'audits', 'content', 'performance', 'autopilot', 'team', 'settings'];
+    const validTabs = ['overview', 'websites', 'action_plan', 'audits', 'competitors', 'content', 'performance', 'autopilot', 'team', 'settings'];
     if (tab && validTabs.includes(tab)) {
       setActiveTab(tab);
     }
@@ -301,6 +302,15 @@ export default function DashboardPage() {
               website={selectedWebsite}
               onRefreshWebsites={loadWebsites}
               onNavigateToStrategist={() => setActiveTab('action_plan')}
+            />
+          )}
+
+          {/* SECTION 4B: COMPETITOR ANALYSIS */}
+          {activeTab === 'competitors' && (
+            <CompetitorAnalysisView
+              website={selectedWebsite}
+              onNavigateToActionPlan={() => setActiveTab('action_plan')}
+              onNavigateToContent={() => setActiveTab('content')}
             />
           )}
 

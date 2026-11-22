@@ -862,3 +862,214 @@ export interface WebsitePermission {
 
 
 
+
+
+// ============================================================================
+// Phase 8: Competitor Analysis Module Types
+// ============================================================================
+
+export type CompetitorCategory = 'direct' | 'organic_search' | 'content' | 'indirect';
+export type CompetitorTier = 'primary' | 'secondary';
+
+export interface CompetitorDomainSnapshot {
+  id: number;
+  domain: string;
+  is_target: boolean;
+  country: string;
+  language: string;
+  organic_traffic_estimate: number | null;
+  organic_keywords_count: number | null;
+  traffic_value_estimate: number | null;
+  referring_domains_count: number | null;
+  backlinks_count: number | null;
+  indexed_pages_count: number | null;
+  authority_score: number | null;
+  authority_metric_label: string | null;
+  serp_visibility_score: number | null;
+  ranking_distribution?: {
+    pos_1_3?: number;
+    pos_4_10?: number;
+    pos_11_20?: number;
+    pos_21_50?: number;
+    pos_51_100?: number;
+  } | null;
+  top_keywords?: Array<Record<string, any>>;
+  top_pages?: Array<{ url: string; title?: string; estimated_traffic?: number | null; source?: string }>;
+  crawled_signals?: Record<string, any>;
+  data_source: string;
+  data_classification: string;
+  captured_at: string;
+}
+
+export interface CompetitorDomainItem {
+  id: number;
+  website_id: number;
+  domain: string;
+  display_name: string | null;
+  category: CompetitorCategory;
+  tier: CompetitorTier;
+  country: string;
+  language: string;
+  discovery_source: string;
+  discovery_confidence: number | null;
+  discovery_rationale: string | null;
+  is_active: boolean;
+  last_analyzed_at: string | null;
+  latest_snapshot?: CompetitorDomainSnapshot | null;
+}
+
+export interface CompetitorDiscoveryCandidate {
+  domain: string;
+  category: CompetitorCategory;
+  confidence: number;
+  is_portal_filtered?: boolean;
+  shared_keywords: number | null;
+  serp_overlap_pct: number | null;
+  organic_traffic_estimate?: number | null;
+  sample_urls?: string[];
+  relevance_reason: string;
+  source: string;
+  already_tracked: boolean;
+  confirmed: boolean;
+}
+
+export interface CompetitorDiscoveryRun {
+  id: number;
+  country: string;
+  language: string;
+  search_engine: string;
+  industry_context: string | null;
+  provider: string;
+  methodology: string;
+  status: string;
+  candidates: CompetitorDiscoveryCandidate[];
+  error_message: string | null;
+  completed_at: string | null;
+  created_at: string;
+}
+
+export interface CompetitorKeywordItem {
+  id: number;
+  keyword: string;
+  country: string;
+  language: string;
+  search_volume: number | null;
+  keyword_difficulty: number | null;
+  cpc: number | null;
+  search_intent: string | null;
+  target_position: number | null;
+  target_url: string | null;
+  competitor_positions: Record<string, { position: number | null; url: string | null }>;
+  gap_type: 'missing' | 'weak' | 'shared' | 'strong' | 'untapped';
+  serp_features: string[] | null;
+  opportunity_score: number | null;
+  data_source: string;
+  data_classification: string;
+  last_updated_at: string;
+  saved_recommendation_id: number | null;
+}
+
+export interface CompetitorContentGapItem {
+  id: number;
+  topic: string;
+  suggested_title: string;
+  primary_keyword: string;
+  secondary_keywords: string[] | null;
+  search_intent: string;
+  suggested_content_type: string;
+  recommended_outline: Array<{ heading: string; level: number; key_points?: string[] }> | null;
+  competitor_reference_urls: Array<{ domain: string; url: string; title?: string; position?: number | null }>;
+  target_coverage_status: 'missing_verified' | 'weak_coverage' | 'unverified_crawl_needed';
+  rationale: string;
+  priority: 'critical' | 'high' | 'medium' | 'low';
+  confidence: 'high' | 'medium' | 'low';
+  data_source: string;
+  status: 'open' | 'sent_to_studio' | 'saved_to_action_plan' | 'dismissed';
+  content_brief_id: number | null;
+}
+
+export interface CompetitorSerpSnapshotItem {
+  id: number;
+  keyword: string;
+  country: string;
+  language: string;
+  search_engine: string;
+  device: 'desktop' | 'mobile';
+  location: string | null;
+  is_monitored: boolean;
+  search_intent: string | null;
+  serp_features: string[] | null;
+  organic_results: Array<{
+    position: number;
+    domain: string;
+    url: string;
+    title: string;
+    snippet: string;
+    is_target: boolean;
+    is_competitor: boolean;
+    competitor_category?: string | null;
+  }>;
+  target_position: number | null;
+  competitor_presence: Record<string, number> | null;
+  content_patterns: Record<string, any> | null;
+  data_source: string;
+  captured_at: string;
+}
+
+export interface CompetitorStrategyReportItem {
+  id: number;
+  executive_summary: string;
+  strength_analysis: Array<{ metric: string; observation: string; classification: string }>;
+  weakness_analysis: Array<{ metric: string; observation: string; classification: string }>;
+  keyword_opportunities: Array<Record<string, any>>;
+  content_opportunities: Array<Record<string, any>>;
+  backlink_opportunities: Array<Record<string, any>>;
+  serp_opportunities: Array<Record<string, any>>;
+  strategic_recommendations: Array<{
+    title: string;
+    category: string;
+    explanation: string;
+    supporting_evidence: string;
+    source_url: string;
+    expected_benefit: string;
+    priority: 'critical' | 'high' | 'medium' | 'low';
+    effort: 'low' | 'medium' | 'high';
+    confidence: 'low' | 'medium' | 'high';
+    next_action: string;
+    observed_vs_interpreted?: { observed: string; interpreted: string };
+    saved_recommendation_id?: number;
+  }>;
+  provider_model: string;
+  data_sources_used: string[];
+  generated_at: string;
+}
+
+export interface CompetitorProviderStatus {
+  providers: Array<{
+    id: string;
+    label: string;
+    configured: boolean;
+    capabilities: string[];
+    required_env_vars: string[];
+    docs_url: string | null;
+  }>;
+  capabilities: Record<string, { active_provider: string; active_label: string; external_connected: boolean }>;
+  any_external_connected: boolean;
+  first_party_active: boolean;
+  usage: {
+    total_calls: number;
+    estimated_cost_usd: number;
+    recent_logs: Array<{
+      id: number;
+      provider: string;
+      capability: string;
+      endpoint: string;
+      status: string;
+      http_status: number | null;
+      duration_ms: number;
+      estimated_cost_usd: number;
+      error_message: string | null;
+      created_at: string;
+    }>;
+  };
+}

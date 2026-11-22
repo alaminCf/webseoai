@@ -17,6 +17,7 @@ import {
   Shield,
   Clock,
   Layers,
+  Target,
 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { ThemeToggle } from './ThemeToggle';
@@ -45,6 +46,7 @@ export function Sidebar({
     { id: 'websites', label: 'My Websites', icon: Globe },
     { id: 'action_plan', label: 'SEO Action Plan', icon: Sparkles, badge: 'AI' },
     { id: 'audits', label: 'Site Audit', icon: Activity },
+    { id: 'competitors', label: 'Competitor Analysis', icon: Target, badge: 'NEW' },
     { id: 'content', label: 'Content Studio', icon: FileText },
     { id: 'performance', label: 'Performance', icon: BarChart3 },
     { id: 'autopilot', label: 'Autopilot', icon: Zap },
