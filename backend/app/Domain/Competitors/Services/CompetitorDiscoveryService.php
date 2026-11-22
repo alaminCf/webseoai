@@ -287,31 +287,44 @@ class CompetitorDiscoveryService
         );
         $brandTokens = array_values(array_diff($brandTokens, $geoPreserve));
 
-        // 1. Gather CrawledPage metadata (homepage preferred, fallback to top crawled pages)
+        // 1. Gather CrawledPage metadata (homepage preferred, fallback to top crawled pages + clean URL slugs)
         $crawledPages = CrawledPage::where('website_id', $website->id)
             ->where('status_code', '>=', 200)
             ->where('status_code', '<', 400)
             ->orderByRaw('LENGTH(url) ASC')
-            ->limit(4)
+            ->limit(15)
             ->get(['url', 'page_title', 'meta_description', 'h1_tags']);
 
         $homepageTitle = '';
         $homepageDesc = '';
         $homepageH1 = '';
+        $urlSlugWords = [];
 
         foreach ($crawledPages as $page) {
-            if ($homepageTitle === '' && !empty($page->page_title)) {
-                $homepageTitle = trim((string) $page->page_title);
+            $t = trim((string) ($page->page_title ?? ''));
+            if ($homepageTitle === '' && $t !== '' && !$this->isInterstitialTitle($t)) {
+                $homepageTitle = $t;
             }
-            if ($homepageDesc === '' && !empty($page->meta_description)) {
-                $homepageDesc = trim((string) $page->meta_description);
+            $d = trim((string) ($page->meta_description ?? ''));
+            if ($homepageDesc === '' && $d !== '' && !$this->isInterstitialTitle($d)) {
+                $homepageDesc = $d;
             }
             if ($homepageH1 === '' && is_array($page->h1_tags) && !empty($page->h1_tags[0])) {
-                $homepageH1 = trim((string) $page->h1_tags[0]);
+                $h = trim((string) $page->h1_tags[0]);
+                if ($h !== '' && !$this->isInterstitialTitle($h)) {
+                    $homepageH1 = $h;
+                }
+            }
+            $path = trim((string) parse_url((string) $page->url, PHP_URL_PATH), '/');
+            if ($path !== '' && !str_contains($path, '.')) {
+                $firstSeg = explode('/', $path)[0] ?? '';
+                if ($firstSeg !== '' && strlen($firstSeg) >= 4 && strlen($firstSeg) <= 32) {
+                    $urlSlugWords[] = str_replace(['-', '_'], ' ', $firstSeg);
+                }
             }
         }
 
-        // 2. If website hasn't been crawled yet (or has no title), fetch live homepage safely
+        // 2. If website hasn't been crawled yet (or has no valid title), fetch live homepage safely
         if ($homepageTitle === '') {
             $liveMeta = $this->fetchLiveHomepageMeta($website->target_url ?: "https://{$targetDomain}", $targetDomain);
             $homepageTitle = $liveMeta['title'];
@@ -322,6 +335,8 @@ class CompetitorDiscoveryService
                 $homepageH1 = $liveMeta['h1'];
             }
         }
+
+        $slugPhrase = implode(' ', array_slice(array_unique($urlSlugWords), 0, 5));
 
         // 3. Extract clean title segment (strip brand prefix/suffix separated by —, |, -, :)
         $cleanTitlePhrase = $this->stripBrandSegment($homepageTitle, $brandTokens);
@@ -363,7 +378,7 @@ class CompetitorDiscoveryService
 
         // 7. Extract ordered core service terms (meaningful non-brand nouns/modifiers)
         $serviceTerms = $this->extractKeywords(
-            implode(' ', [$industryContext ?? '', $cleanTitlePhrase, $cleanH1Phrase, $profileProducts, $homepageDesc]),
+            implode(' ', [$industryContext ?? '', $cleanTitlePhrase, $cleanH1Phrase, $profileProducts, $slugPhrase, $homepageDesc]),
             $brandTokens
         );
 
@@ -379,9 +394,9 @@ class CompetitorDiscoveryService
             $queries[] = $q;
         }
 
-        // Query B: Primary service phrase synthesized from homepage title / products + country
+        // Query B: Primary service phrase synthesized from homepage title / products / slugs + country
         $primaryTokens = $this->extractKeywords(
-            trim($cleanTitlePhrase !== '' ? $cleanTitlePhrase : ($cleanH1Phrase !== '' ? $cleanH1Phrase : $profileProducts)),
+            trim($cleanTitlePhrase !== '' ? $cleanTitlePhrase : ($cleanH1Phrase !== '' ? $cleanH1Phrase : ($profileProducts !== '' ? $profileProducts : $slugPhrase))),
             $brandTokens
         );
         $geoTokens = array_filter([$detectedCity, $countryName]);
@@ -514,15 +529,13 @@ class CompetitorDiscoveryService
 
         try {
             if (!app()->runningUnitTests()) {
-                $validation = UrlSecurityValidator::validate($url, $domain);
-                if (!($validation['valid'] ?? false)) {
-                    return $empty;
-                }
+                UrlSecurityValidator::validate($url, $domain);
             }
 
             $res = Http::withHeaders([
-                'User-Agent' => 'Mozilla/5.0 (compatible; WebSEOAI-Discovery/1.0)',
-                'Accept' => 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
+                'User-Agent' => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+                'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language' => 'en-US,en;q=0.9',
             ])->timeout(6)->get($url);
 
             if (!$res->successful()) {
@@ -537,6 +550,9 @@ class CompetitorDiscoveryService
             if (preg_match('/<title[^>]*>(.*?)<\/title>/is', $html, $m)) {
                 $title = trim(html_entity_decode(strip_tags($m[1]), ENT_QUOTES | ENT_HTML5));
             }
+            if ($this->isInterstitialTitle($title)) {
+                return $empty;
+            }
             if (preg_match('/<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']*)["\']/is', $html, $m)
                 || preg_match('/<meta[^>]+content=["\']([^"\']*)["\'][^>]+name=["\']description["\']/is', $html, $m)) {
                 $desc = trim(html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5));
@@ -549,6 +565,17 @@ class CompetitorDiscoveryService
         } catch (Throwable) {
             return $empty;
         }
+    }
+
+    private function isInterstitialTitle(string $text): bool
+    {
+        $lower = strtolower(trim($text));
+        foreach (['one moment, please', 'just a moment', 'attention required', 'access denied', 'checking your browser', 'verify you are human', 'security check', '403 forbidden', '404 not found'] as $needle) {
+            if (str_contains($lower, $needle)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private function stripBrandSegment(string $text, array $brandTokens): string

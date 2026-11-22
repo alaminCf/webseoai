@@ -457,14 +457,15 @@ class FirstPartyCrawlProvider implements CompetitorProviderInterface
 
         try {
             if (!app()->runningUnitTests()) {
-                $validation = UrlSecurityValidator::validate($targetUrl, $domain);
-                if (!($validation['valid'] ?? false)) {
+                try {
+                    UrlSecurityValidator::validate($targetUrl, $domain);
+                } catch (Throwable $valEx) {
                     return [
                         'available' => false,
                         'provider' => $this->getName(),
                         'classification' => 'first_party_verified',
                         'metrics' => $this->emptyMetrics($crawledSignals),
-                        'error' => 'Domain blocked by SSRF security policy: ' . ($validation['reason'] ?? 'invalid host'),
+                        'error' => 'Domain blocked by SSRF security policy: ' . $valEx->getMessage(),
                     ];
                 }
             }
