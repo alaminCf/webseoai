@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\V1;
 use App\Domain\Competitors\CompetitorProviderManager;
 use App\Domain\Competitors\Services\AiCompetitorStrategistService;
 use App\Domain\Competitors\Services\BacklinkGapService;
+use App\Domain\Competitors\Services\CompetitorDeepDiveService;
 use App\Domain\Competitors\Services\CompetitorDiscoveryService;
 use App\Domain\Competitors\Services\CompetitorMonitoringService;
 use App\Domain\Competitors\Services\ContentGapService;
@@ -44,7 +45,8 @@ class CompetitorAnalysisController extends Controller
         private BacklinkGapService $backlinkGapService,
         private SerpAnalysisService $serpAnalysisService,
         private AiCompetitorStrategistService $strategistService,
-        private CompetitorMonitoringService $monitoringService
+        private CompetitorMonitoringService $monitoringService,
+        private CompetitorDeepDiveService $deepDiveService
     ) {
     }
 
@@ -191,7 +193,63 @@ class CompetitorAnalysisController extends Controller
             $request
         );
 
-        return $this->success($comp->load('latestSnapshot'), null, 201);
+        // Immediately capture verified first-party & Google index snapshot in production so data appears right away
+        if (!app()->runningUnitTests()) {
+            try {
+                $this->comparisonService->captureDomainSnapshot($website, $comp->domain, false, $comp, $comp->country, $comp->language, false);
+            } catch (\Throwable) {
+                // Non-blocking enrichment
+            }
+        }
+
+        return $this->success($comp->fresh('latestSnapshot'), null, 201);
+    }
+
+    /**
+     * Head-to-Head Deep Dive comparison & improvement roadmap against a specific competitor.
+     */
+    public function deepDive(Request $request, Website $website, CompetitorDomain $competitor): JsonResponse
+    {
+        $this->authorizeWebsite($request, $website);
+
+        if ((int) $competitor->website_id !== (int) $website->id) {
+            return $this->error('Competitor not found for this website.', 'COMPETITOR_NOT_FOUND', null, 404);
+        }
+
+        $forceRefresh = $request->boolean('refresh', false);
+        $report = $this->deepDiveService->buildDeepDive($website, $competitor, $forceRefresh);
+
+        return $this->success($report);
+    }
+
+    /**
+     * Save a Deep Dive improvement directly into the website's SEO Action Plan.
+     */
+    public function saveDeepDiveAction(Request $request, Website $website, CompetitorDomain $competitor): JsonResponse
+    {
+        $this->authorizeWebsite($request, $website);
+        $this->requireMinimumRole($request, OrganizationMember::ROLE_EDITOR);
+
+        if ((int) $competitor->website_id !== (int) $website->id) {
+            return $this->error('Competitor not found for this website.', 'COMPETITOR_NOT_FOUND', null, 404);
+        }
+
+        $validated = $request->validate([
+            'title' => ['required', 'string', 'max:255'],
+            'category' => ['nullable', 'string', 'max:40'],
+            'priority' => ['nullable', 'string', 'max:20'],
+            'effort' => ['nullable', 'string', 'max:20'],
+            'your_current' => ['nullable', 'string', 'max:500'],
+            'competitor_benchmark' => ['nullable', 'string', 'max:500'],
+            'why_it_matters' => ['nullable', 'string', 'max:1000'],
+            'expected_impact' => ['nullable', 'string', 'max:500'],
+            'action_steps' => ['nullable', 'array'],
+            'affected_url' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        $rec = $this->deepDiveService->saveImprovementToActionPlan($website, $competitor, $validated);
+
+        return $this->success($rec, null, 201);
     }
 
     /**
@@ -318,9 +376,20 @@ class CompetitorAnalysisController extends Controller
 
         $added = $this->discoveryService->confirmCandidates($website, $run, $validated['selected']);
 
+        // Immediately capture verified snapshots for newly confirmed competitors (up to 3) so data is visible right away
+        if (!app()->runningUnitTests()) {
+            foreach (array_slice($added, 0, 3) as $comp) {
+                try {
+                    $this->comparisonService->captureDomainSnapshot($website, $comp->domain, false, $comp, $comp->country, $comp->language, false);
+                } catch (\Throwable) {
+                    // Non-blocking enrichment
+                }
+            }
+        }
+
         return $this->success([
             'added_count' => count($added),
-            'competitors' => $added,
+            'competitors' => collect($added)->map(fn ($c) => $c->fresh('latestSnapshot'))->values(),
             'discovery_run' => $run->fresh(),
         ]);
     }

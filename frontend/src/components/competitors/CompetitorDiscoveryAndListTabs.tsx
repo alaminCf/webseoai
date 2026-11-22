@@ -39,6 +39,7 @@ interface OverviewTabProps {
   isAnalyzing: boolean;
   onLaunchAnalysis: () => void;
   onSwitchSubTab: (tab: string) => void;
+  onSelectCompetitor?: (competitorId: number) => void;
   onRefresh: () => void;
 }
 
@@ -49,6 +50,7 @@ export function CompetitorOverviewTab({
   isAnalyzing,
   onLaunchAnalysis,
   onSwitchSubTab,
+  onSelectCompetitor,
   onRefresh,
 }: OverviewTabProps) {
   if (isLoading && !overview) {
@@ -135,15 +137,23 @@ export function CompetitorOverviewTab({
         </div>
 
         <div className="p-5 bg-zinc-950 border border-zinc-800/80 rounded-2xl">
-          <div className="text-[11px] uppercase tracking-wider font-semibold text-zinc-400">Target Organic Estimate</div>
+          <div className="text-[11px] uppercase tracking-wider font-semibold text-zinc-400">
+            {targetSnap?.organic_traffic_estimate != null ? 'Target Organic Estimate' : 'Target On-Page SEO Score'}
+          </div>
           <div className="text-2xl font-extrabold text-zinc-100 font-mono mt-1">
-            {targetSnap?.organic_traffic_estimate !== null && targetSnap?.organic_traffic_estimate !== undefined
+            {targetSnap?.organic_traffic_estimate != null
               ? targetSnap.organic_traffic_estimate.toLocaleString()
-              : 'Data unavailable'}
+              : targetSnap?.crawled_signals?.onpage_seo_score != null
+              ? `${targetSnap.crawled_signals.onpage_seo_score}/100`
+              : targetSnap?.indexed_pages_count != null
+              ? `${targetSnap.indexed_pages_count} Pages`
+              : 'Run Analysis'}
           </div>
           <div className="text-[11px] text-zinc-400 mt-1">
             {targetSnap?.crawled_signals?.gsc_28d_clicks !== undefined
               ? `Verified GSC 28d clicks: ${targetSnap.crawled_signals.gsc_28d_clicks.toLocaleString()}`
+              : targetSnap?.crawled_signals?.word_count != null
+              ? `${targetSnap.crawled_signals.word_count.toLocaleString()} words • ${targetSnap.indexed_pages_count ?? 0} pages`
               : targetSnap?.data_source
               ? `Source: ${targetSnap.data_source}`
               : 'Run analysis to capture baseline'}
@@ -214,36 +224,91 @@ export function CompetitorOverviewTab({
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {(overview?.competitors ?? []).map((comp: CompetitorDomainItem) => {
               const snap = comp.latest_snapshot;
+              const sig = snap?.crawled_signals || {};
+              const seoScore = sig.onpage_seo_score;
+              const words = sig.word_count;
+              const speedMs = sig.load_time_ms;
+              const pagesCount = snap?.indexed_pages_count ?? sig.google_indexed_sample_count ?? sig.sitemap_urls_count;
+              const schemaCount = Array.isArray(sig.structured_data_types) ? sig.structured_data_types.length : 0;
+              const mentionsCount = sig.web_mentions_count;
+
               return (
-                <div key={comp.id} className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800 space-y-2.5">
+                <div
+                  key={comp.id}
+                  onClick={() => onSelectCompetitor?.(comp.id)}
+                  className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800 hover:border-emerald-600/60 transition cursor-pointer space-y-3 group"
+                >
                   <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <div className="text-xs font-bold text-zinc-100 flex items-center gap-1.5">
-                        {comp.domain}
-                        {comp.tier === 'primary' && <Star className="w-3 h-3 text-amber-400 fill-amber-400" />}
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-zinc-100 group-hover:text-emerald-400 transition flex items-center gap-1.5">
+                        <span className="truncate">{comp.domain}</span>
+                        {comp.tier === 'primary' && <Star className="w-3 h-3 text-amber-400 fill-amber-400 shrink-0" />}
                       </div>
                       <div className="text-[10px] text-zinc-400 capitalize mt-0.5">
                         {comp.category.replace('_', ' ')} • {comp.country}/{comp.language}
                       </div>
                     </div>
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-zinc-950 border border-zinc-800 text-zinc-400 font-mono">
-                      {snap?.data_source || 'pending'}
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-zinc-950 border border-zinc-800 text-zinc-400 font-mono shrink-0">
+                      {seoScore != null ? `SEO ${seoScore}/100` : snap?.data_source || 'Click to Scan'}
                     </span>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 text-[11px] pt-1 border-t border-zinc-800/70">
+
+                  {sig.page_title && (
+                    <div className="text-[11px] text-zinc-300 truncate">{sig.page_title}</div>
+                  )}
+
+                  <div className="grid grid-cols-2 gap-2 text-[11px] pt-2 border-t border-zinc-800/70">
                     <div>
-                      <span className="text-zinc-500 block">Est. Traffic</span>
+                      <span className="text-zinc-500 block">
+                        {snap?.organic_traffic_estimate != null ? 'Est. Traffic' : 'Indexed / Pages'}
+                      </span>
                       <span className="font-mono font-semibold text-zinc-200">
-                        {snap?.organic_traffic_estimate != null ? snap.organic_traffic_estimate.toLocaleString() : 'Data unavailable'}
+                        {snap?.organic_traffic_estimate != null
+                          ? snap.organic_traffic_estimate.toLocaleString()
+                          : pagesCount != null
+                          ? `${pagesCount.toLocaleString()} pages`
+                          : 'Click to inspect'}
                       </span>
                     </div>
                     <div>
-                      <span className="text-zinc-500 block">Ref. Domains</span>
+                      <span className="text-zinc-500 block">
+                        {snap?.referring_domains_count != null ? 'Ref. Domains' : mentionsCount != null ? 'Web Mentions' : 'Content Depth'}
+                      </span>
                       <span className="font-mono font-semibold text-zinc-200">
-                        {snap?.referring_domains_count != null ? snap.referring_domains_count.toLocaleString() : 'Data unavailable'}
+                        {snap?.referring_domains_count != null
+                          ? snap.referring_domains_count.toLocaleString()
+                          : mentionsCount != null
+                          ? `${mentionsCount} mentions`
+                          : words != null
+                          ? `${words.toLocaleString()} words`
+                          : 'Click to inspect'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-zinc-500 block">Load Speed</span>
+                      <span className="font-mono font-semibold text-zinc-200">
+                        {speedMs != null ? `${speedMs} ms` : '—'}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-zinc-500 block">Schema Types</span>
+                      <span className="font-mono font-semibold text-zinc-200">
+                        {snap ? `${schemaCount} detected` : '—'}
                       </span>
                     </div>
                   </div>
+
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSelectCompetitor?.(comp.id);
+                    }}
+                    className="w-full py-1.5 px-3 text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-lg transition flex items-center justify-center gap-1.5"
+                  >
+                    <span>Compare vs {website.domain} &amp; Improvements</span>
+                    <ArrowRight className="w-3 h-3" />
+                  </button>
                 </div>
               );
             })}
@@ -302,6 +367,7 @@ interface MyCompetitorsTabProps {
   onCountriesChange?: (countries: string[]) => void;
   language: string;
   competitors: CompetitorDomainItem[];
+  onSelectCompetitor?: (competitorId: number) => void;
   onRefresh: () => void;
 }
 
@@ -312,6 +378,7 @@ export function MyCompetitorsTab({
   onCountriesChange,
   language,
   competitors,
+  onSelectCompetitor,
   onRefresh,
 }: MyCompetitorsTabProps) {
   const toast = useToast();
@@ -1005,14 +1072,25 @@ export function MyCompetitorsTab({
                       {comp.last_analyzed_at ? new Date(comp.last_analyzed_at).toLocaleString() : 'Not analyzed yet'}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteComp(comp)}
-                        className="p-1.5 text-zinc-400 hover:text-rose-400 hover:bg-zinc-900 rounded-lg transition"
-                        title="Remove Competitor"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      <div className="inline-flex items-center gap-1.5">
+                        {onSelectCompetitor && (
+                          <button
+                            type="button"
+                            onClick={() => onSelectCompetitor(comp.id)}
+                            className="px-2.5 py-1 text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-lg transition"
+                          >
+                            Compare &amp; Improve
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteComp(comp)}
+                          className="p-1.5 text-zinc-400 hover:text-rose-400 hover:bg-zinc-900 rounded-lg transition"
+                          title="Remove Competitor"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}

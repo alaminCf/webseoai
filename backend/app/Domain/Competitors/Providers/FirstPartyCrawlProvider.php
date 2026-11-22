@@ -469,46 +469,112 @@ class FirstPartyCrawlProvider implements CompetitorProviderInterface
 
             $start = microtime(true);
             $res = Http::withHeaders([
-                'User-Agent' => 'Mozilla/5.0 (compatible; WebSEOAI-CompetitorInspector/1.0)',
-                'Accept' => 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
+                'User-Agent' => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+                'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language' => 'en-US,en;q=0.9',
             ])->timeout(10)->get($targetUrl);
             $elapsed = (int) round((microtime(true) - $start) * 1000);
 
             $inspected = PageInspector::inspect($res->body(), $targetUrl, $domain, $res->headers(), $res->status(), $elapsed, $targetUrl);
+            $isWaf = (bool) ($inspected['is_blocked_by_waf'] ?? false);
 
-            $crawledSignals['reachable'] = $res->successful();
+            $headingsTree = is_array($inspected['headings_tree'] ?? null) ? $inspected['headings_tree'] : [];
+            $h2Tags = [];
+            $h3Count = 0;
+            foreach ($headingsTree as $node) {
+                $tag = strtolower((string) ($node['tag'] ?? ''));
+                $txt = trim((string) ($node['text'] ?? ''));
+                if ($tag === 'h2' && $txt !== '') {
+                    $h2Tags[] = $txt;
+                } elseif ($tag === 'h3') {
+                    $h3Count++;
+                }
+            }
+
+            $imagesCount = (int) ($inspected['images_count'] ?? 0);
+            $imagesMissingAlt = (int) ($inspected['images_missing_alt'] ?? 0);
+            $altCoveragePct = $imagesCount > 0
+                ? (int) round((($imagesCount - $imagesMissingAlt) / $imagesCount) * 100)
+                : 100;
+
+            $internalLinks = is_array($inspected['internal_links'] ?? null) ? $inspected['internal_links'] : [];
+            $externalLinks = is_array($inspected['external_links'] ?? null) ? $inspected['external_links'] : [];
+            $schemaTypes = array_values(array_unique($inspected['structured_data']['types'] ?? []));
+            $og = is_array($inspected['open_graph'] ?? null) ? $inspected['open_graph'] : [];
+            $tw = is_array($inspected['twitter_card'] ?? null) ? $inspected['twitter_card'] : [];
+            $secHeaders = is_array($inspected['security_headers'] ?? null) ? $inspected['security_headers'] : [];
+            $secScoreCount = count(array_filter($secHeaders, fn ($v) => $v === true));
+
+            $allLinkBlob = strtolower(implode(' ', array_map(fn ($l) => ($l['url'] ?? '') . ' ' . ($l['text'] ?? ''), $internalLinks)));
+            $rawBodyLower = strtolower($res->body());
+            $hasBlogSection = (bool) preg_match('#/(blog|articles?|news|guides?|resources|insights)\b#i', $allLinkBlob);
+            $hasFaqSignal = in_array('FAQPage', $schemaTypes, true)
+                || (bool) preg_match('/\b(faq|frequently asked questions)\b/i', implode(' ', $h2Tags));
+            $hasContactCta = str_contains($rawBodyLower, 'tel:')
+                || str_contains($rawBodyLower, 'wa.me')
+                || str_contains($rawBodyLower, 'whatsapp')
+                || str_contains($allLinkBlob, '/contact')
+                || str_contains($allLinkBlob, '/book');
+
+            $pageTitle = $isWaf ? null : ($inspected['page_title'] ?? null);
+            $metaDesc = $isWaf ? null : ($inspected['meta_description'] ?? null);
+            $h1Tags = $isWaf ? [] : ($inspected['h1_tags'] ?? []);
+            $wordCount = $isWaf ? null : ($inspected['word_count'] ?? null);
+
+            $crawledSignals['reachable'] = $res->successful() && !$isWaf;
             $crawledSignals['http_status'] = $res->status();
             $crawledSignals['load_time_ms'] = $elapsed;
-            $crawledSignals['page_title'] = $inspected['page_title'] ?? null;
-            $crawledSignals['meta_description'] = $inspected['meta_description'] ?? null;
-            $crawledSignals['h1_tags'] = $inspected['h1_tags'] ?? [];
-            $crawledSignals['word_count'] = $inspected['word_count'] ?? null;
-            $crawledSignals['structured_data_types'] = $inspected['structured_data']['types'] ?? [];
-            $crawledSignals['internal_links_count'] = $inspected['internal_links_count'] ?? 0;
-            $crawledSignals['is_blocked_by_waf'] = (bool) ($inspected['is_blocked_by_waf'] ?? false);
+            $crawledSignals['page_title'] = $pageTitle;
+            $crawledSignals['title_length'] = $pageTitle !== null ? mb_strlen($pageTitle) : 0;
+            $crawledSignals['meta_description'] = $metaDesc;
+            $crawledSignals['meta_description_length'] = $metaDesc !== null ? mb_strlen($metaDesc) : 0;
+            $crawledSignals['h1_tags'] = $h1Tags;
+            $crawledSignals['h1_count'] = count($h1Tags);
+            $crawledSignals['h2_tags'] = array_slice($h2Tags, 0, 10);
+            $crawledSignals['h2_count'] = count($h2Tags);
+            $crawledSignals['h3_count'] = $h3Count;
+            $crawledSignals['word_count'] = $wordCount;
+            $crawledSignals['structured_data_types'] = $schemaTypes;
+            $crawledSignals['images_count'] = $imagesCount;
+            $crawledSignals['images_missing_alt'] = $imagesMissingAlt;
+            $crawledSignals['image_alt_coverage_pct'] = $isWaf ? null : $altCoveragePct;
+            $crawledSignals['internal_links_count'] = count($internalLinks);
+            $crawledSignals['external_links_count'] = count($externalLinks);
+            $crawledSignals['has_canonical'] = !empty($inspected['canonical_url']);
+            $crawledSignals['canonical_url'] = $inspected['canonical_url'] ?? null;
+            $crawledSignals['has_open_graph'] = !empty($og['title']) || !empty($og['description']) || !empty($og['image']);
+            $crawledSignals['has_twitter_card'] = !empty($tw['card']) || !empty($tw['title']);
+            $crawledSignals['has_viewport'] = !empty($inspected['viewport']);
+            $crawledSignals['has_blog_section'] = $hasBlogSection;
+            $crawledSignals['has_faq_signal'] = $hasFaqSignal;
+            $crawledSignals['has_contact_cta'] = $hasContactCta;
+            $crawledSignals['security_headers_count'] = $secScoreCount;
+            $crawledSignals['is_blocked_by_waf'] = $isWaf;
 
-            if ($res->successful() && !empty($inspected['page_title'])) {
+            if ($res->successful() && !$isWaf && !empty($pageTitle)) {
                 $topPages[] = [
                     'url' => $targetUrl,
-                    'title' => $inspected['page_title'],
-                    'h1' => $inspected['h1_tags'][0] ?? null,
-                    'word_count' => $inspected['word_count'] ?? null,
+                    'title' => $pageTitle,
+                    'h1' => $h1Tags[0] ?? null,
+                    'word_count' => $wordCount,
                     'estimated_traffic' => null,
                     'source' => 'first_party_crawl',
                 ];
             }
 
             // Collect prominent internal navigation URLs as verified public pages
-            foreach (array_slice($inspected['internal_links'] ?? [], 0, 8) as $link) {
-                $linkUrl = (string) ($link['url'] ?? '');
-                $linkText = trim((string) ($link['text'] ?? ''));
-                if ($linkUrl !== '' && $linkUrl !== $targetUrl && !str_contains($linkUrl, '#')) {
-                    $topPages[] = [
-                        'url' => $linkUrl,
-                        'title' => $linkText !== '' ? $linkText : trim((string) parse_url($linkUrl, PHP_URL_PATH), '/'),
-                        'estimated_traffic' => null,
-                        'source' => 'first_party_crawl',
-                    ];
+            if (!$isWaf) {
+                foreach (array_slice($internalLinks, 0, 10) as $link) {
+                    $linkUrl = (string) ($link['url'] ?? '');
+                    $linkText = trim((string) ($link['text'] ?? ''));
+                    if ($linkUrl !== '' && $linkUrl !== $targetUrl && !str_contains($linkUrl, '#')) {
+                        $topPages[] = [
+                            'url' => $linkUrl,
+                            'title' => $linkText !== '' ? $linkText : trim((string) parse_url($linkUrl, PHP_URL_PATH), '/'),
+                            'estimated_traffic' => null,
+                            'source' => 'first_party_crawl',
+                        ];
+                    }
                 }
             }
 
@@ -522,7 +588,7 @@ class FirstPartyCrawlProvider implements CompetitorProviderInterface
                     preg_match_all('/<loc>\s*(https?:\/\/[^<\s]+)\s*<\/loc>/i', $smRes->body(), $matches);
                     $locs = array_unique($matches[1] ?? []);
                     $crawledSignals['sitemap_urls_count'] = count($locs);
-                    foreach (array_slice($locs, 0, 10) as $loc) {
+                    foreach (array_slice($locs, 0, 12) as $loc) {
                         if (!collect($topPages)->contains('url', $loc)) {
                             $topPages[] = [
                                 'url' => $loc,
@@ -537,7 +603,8 @@ class FirstPartyCrawlProvider implements CompetitorProviderInterface
                 // Optional sitemap probe
             }
 
-            $crawledSignals['top_discovered_pages'] = array_slice($topPages, 0, 12);
+            $crawledSignals['onpage_seo_score'] = self::computeOnPageSeoScore($crawledSignals);
+            $crawledSignals['top_discovered_pages'] = array_slice($topPages, 0, 15);
 
             return [
                 'available' => true,
@@ -603,6 +670,109 @@ class FirstPartyCrawlProvider implements CompetitorProviderInterface
             'organic_results' => [],
             'error' => 'SERP data provider (DataForSEO SERP API or SerpApi) is not configured.',
         ];
+    }
+
+    /**
+     * Deterministic First-Party On-Page SEO Score (0-100) computed strictly from verified crawl signals.
+     */
+    public static function computeOnPageSeoScore(array $signals): ?int
+    {
+        if (empty($signals['reachable']) && empty($signals['page_title']) && empty($signals['google_indexed_sample_count'])) {
+            return null;
+        }
+
+        $score = 0;
+
+        // 1. HTTPS (10 pts)
+        if (($signals['has_https'] ?? true) === true) {
+            $score += 10;
+        }
+
+        // 2. Title Optimization (12 pts)
+        $titleLen = isset($signals['title_length'])
+            ? (int) $signals['title_length']
+            : (isset($signals['page_title']) ? mb_strlen((string) $signals['page_title']) : 0);
+        if ($titleLen >= 25 && $titleLen <= 68) {
+            $score += 12;
+        } elseif ($titleLen > 0) {
+            $score += 6;
+        }
+
+        // 3. Meta Description Optimization (10 pts)
+        $descLen = isset($signals['meta_description_length'])
+            ? (int) $signals['meta_description_length']
+            : (isset($signals['meta_description']) ? mb_strlen((string) $signals['meta_description']) : 0);
+        if ($descLen >= 70 && $descLen <= 170) {
+            $score += 10;
+        } elseif ($descLen > 0) {
+            $score += 5;
+        }
+
+        // 4. H1 Heading (10 pts)
+        $h1Count = isset($signals['h1_count']) ? (int) $signals['h1_count'] : count($signals['h1_tags'] ?? []);
+        if ($h1Count === 1) {
+            $score += 10;
+        } elseif ($h1Count > 1) {
+            $score += 6;
+        }
+
+        // 5. H2 Content Structure (8 pts)
+        $h2Count = (int) ($signals['h2_count'] ?? 0);
+        if ($h2Count >= 3) {
+            $score += 8;
+        } elseif ($h2Count >= 1) {
+            $score += 4;
+        }
+
+        // 6. Content Depth / Word Count (15 pts)
+        $words = (int) ($signals['word_count'] ?? 0);
+        if ($words >= 700) {
+            $score += 15;
+        } elseif ($words >= 350) {
+            $score += 10;
+        } elseif ($words >= 150) {
+            $score += 5;
+        }
+
+        // 7. Structured Data / Schema.org (12 pts)
+        $schemaCount = count($signals['structured_data_types'] ?? []);
+        if ($schemaCount >= 2) {
+            $score += 12;
+        } elseif ($schemaCount === 1) {
+            $score += 7;
+        }
+
+        // 8. Sitemap or Indexed Coverage (8 pts)
+        if (!empty($signals['has_sitemap']) || (int) ($signals['sitemap_urls_count'] ?? 0) > 0 || (int) ($signals['google_indexed_sample_count'] ?? 0) >= 5) {
+            $score += 8;
+        }
+
+        // 9. Image Alt Coverage (5 pts)
+        $altPct = $signals['image_alt_coverage_pct'] ?? null;
+        if ($altPct !== null) {
+            if ($altPct >= 85) {
+                $score += 5;
+            } elseif ($altPct >= 50) {
+                $score += 2;
+            }
+        }
+
+        // 10. Canonical + OpenGraph + Viewport + Fast Load (10 pts)
+        if (!empty($signals['has_canonical'])) {
+            $score += 3;
+        }
+        if (!empty($signals['has_open_graph'])) {
+            $score += 3;
+        }
+        if (!empty($signals['has_viewport'])) {
+            $score += 2;
+        }
+        $loadMs = $signals['load_time_ms'] ?? null;
+        if ($loadMs !== null && $loadMs > 0 && $loadMs <= 1200) {
+            $score += 2;
+        }
+
+        return min(100, max(0, $score));
     }
 
     private function emptyMetrics(array $crawledSignals): array

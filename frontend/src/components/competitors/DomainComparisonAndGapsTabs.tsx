@@ -32,11 +32,13 @@ export function DomainComparisonTab({
   website,
   competitors,
   onLaunchAnalysis,
+  onSelectCompetitor,
   isAnalyzing,
 }: {
   website: Website;
   competitors: CompetitorDomainItem[];
   onLaunchAnalysis: () => void;
+  onSelectCompetitor?: (competitorId: number) => void;
   isAnalyzing: boolean;
 }) {
   const toast = useToast();
@@ -80,9 +82,26 @@ export function DomainComparisonTab({
   };
 
   const domains: any[] = comparison?.domains ?? [];
+  const hasThirdPartyMetrics = domains.some(
+    (d) => d.organic_traffic_estimate != null || d.organic_keywords_count != null || d.referring_domains_count != null
+  );
   const maxTraffic = Math.max(1, ...domains.map((d) => d.organic_traffic_estimate || 0));
   const maxKeywords = Math.max(1, ...domains.map((d) => d.organic_keywords_count || 0));
   const maxRefDomains = Math.max(1, ...domains.map((d) => d.referring_domains_count || 0));
+  const maxWords = Math.max(1, ...domains.map((d) => d.crawled_signals?.word_count || 0));
+  const maxIndexed = Math.max(1, ...domains.map((d) => d.indexed_pages_count || 0));
+
+  const chartSpecs = hasThirdPartyMetrics
+    ? [
+        { label: 'Est. Organic Traffic (3rd-Party)', getVal: (d: any) => d.organic_traffic_estimate, max: maxTraffic, suffix: '', color: 'bg-emerald-500' },
+        { label: 'Organic Keywords Count', getVal: (d: any) => d.organic_keywords_count, max: maxKeywords, suffix: '', color: 'bg-sky-500' },
+        { label: 'Referring Domains', getVal: (d: any) => d.referring_domains_count, max: maxRefDomains, suffix: '', color: 'bg-purple-500' },
+      ]
+    : [
+        { label: 'On-Page SEO Score (First-Party)', getVal: (d: any) => d.crawled_signals?.onpage_seo_score, max: 100, suffix: '/100', color: 'bg-emerald-500' },
+        { label: 'Homepage Content Depth (Words)', getVal: (d: any) => d.crawled_signals?.word_count, max: maxWords, suffix: ' w', color: 'bg-sky-500' },
+        { label: 'Indexed / Discovered Pages', getVal: (d: any) => d.indexed_pages_count, max: maxIndexed, suffix: '', color: 'bg-purple-500' },
+      ];
 
   const fmt = (val: number | null | undefined, suffix = '') =>
     val !== null && val !== undefined ? `${val.toLocaleString()}${suffix}` : 'Data unavailable';
@@ -147,22 +166,18 @@ export function DomainComparisonTab({
         </div>
       )}
 
-      {/* Visual Bar Charts */}
+      {/* Visual Bar Charts (Automatically adapts to Verified First-Party or Third-Party metrics) */}
       {domains.length > 0 && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          {[
-            { label: 'Est. Organic Traffic (3rd-Party)', key: 'organic_traffic_estimate', max: maxTraffic, color: 'bg-emerald-500' },
-            { label: 'Organic Keywords Count', key: 'organic_keywords_count', max: maxKeywords, color: 'bg-sky-500' },
-            { label: 'Referring Domains', key: 'referring_domains_count', max: maxRefDomains, color: 'bg-purple-500' },
-          ].map((chart) => (
-            <div key={chart.key} className="p-4 bg-zinc-950 border border-zinc-800/80 rounded-2xl space-y-3">
+          {chartSpecs.map((chart) => (
+            <div key={chart.label} className="p-4 bg-zinc-950 border border-zinc-800/80 rounded-2xl space-y-3">
               <div className="text-xs font-bold text-zinc-200 flex items-center gap-1.5">
                 <BarChart3 className="w-3.5 h-3.5 text-emerald-400" />
                 {chart.label}
               </div>
               <div className="space-y-2.5">
                 {domains.map((d) => {
-                  const val = d[chart.key];
+                  const val = chart.getVal(d);
                   const pct = val != null ? Math.max(4, Math.round((val / chart.max) * 100)) : 0;
                   return (
                     <div key={d.domain} className="space-y-1 text-[11px]">
@@ -171,7 +186,7 @@ export function DomainComparisonTab({
                           {d.domain} {d.is_target ? '(You)' : ''}
                         </span>
                         <span className="font-mono text-zinc-400">
-                          {val != null ? val.toLocaleString() : 'N/A'}
+                          {val != null ? `${val.toLocaleString()}${chart.suffix}` : 'N/A'}
                         </span>
                       </div>
                       <div className="w-full h-2 bg-zinc-900 rounded-full overflow-hidden">
@@ -217,9 +232,21 @@ export function DomainComparisonTab({
                 {domains.map((d) => (
                   <tr key={d.domain} className={d.is_target ? 'bg-emerald-950/15' : 'hover:bg-zinc-900/40'}>
                     <td className="px-4 py-3 font-semibold text-zinc-100">
-                      <div>{d.domain}</div>
+                      <div className="flex items-center gap-2">
+                        <span>{d.domain}</span>
+                        {!d.is_target && d.competitor_id && onSelectCompetitor && (
+                          <button
+                            type="button"
+                            onClick={() => onSelectCompetitor(d.competitor_id)}
+                            className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/25 transition"
+                          >
+                            Deep Dive →
+                          </button>
+                        )}
+                      </div>
                       <span className="text-[10px] text-zinc-400">
                         {d.is_target ? 'Your Target Website' : (d.category || 'competitor').replace('_', ' ')}
+                        {d.crawled_signals?.onpage_seo_score != null ? ` • SEO ${d.crawled_signals.onpage_seo_score}/100` : ''}
                       </span>
                     </td>
                     <td className="px-4 py-3 font-mono text-zinc-200">{fmt(d.organic_traffic_estimate)}</td>

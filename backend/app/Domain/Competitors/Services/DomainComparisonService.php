@@ -3,6 +3,7 @@
 namespace App\Domain\Competitors\Services;
 
 use App\Domain\Competitors\CompetitorProviderManager;
+use App\Domain\Competitors\Providers\FirstPartyCrawlProvider;
 use App\Models\CompetitorDomain;
 use App\Models\CompetitorDomainSnapshot;
 use App\Models\CrawledPage;
@@ -85,26 +86,61 @@ class DomainComparisonService
         if ($isTarget) {
             // Pull verified first-party CrawledPage & GSC records already in our DB
             $targetPages = CrawledPage::where('website_id', $website->id)
-                ->orderByDesc('id')
-                ->take(15)
+                ->orderByRaw('LENGTH(url) ASC')
+                ->take(20)
                 ->get();
 
             if ($targetPages->isNotEmpty()) {
                 $home = $targetPages->first();
+                $headingsTree = is_array($home->headings_tree ?? null) ? $home->headings_tree : [];
+                $h2Tags = [];
+                $h3Count = 0;
+                foreach ($headingsTree as $node) {
+                    $tag = strtolower((string) ($node['tag'] ?? ''));
+                    if ($tag === 'h2' && !empty($node['text'])) {
+                        $h2Tags[] = trim((string) $node['text']);
+                    } elseif ($tag === 'h3') {
+                        $h3Count++;
+                    }
+                }
+                $imgCount = (int) ($home->images_count ?? 0);
+                $imgMiss = (int) ($home->images_missing_alt ?? 0);
+                $altPct = $imgCount > 0 ? (int) round((($imgCount - $imgMiss) / $imgCount) * 100) : 100;
+                $allUrlsBlob = strtolower($targetPages->pluck('url')->implode(' '));
+                $crawledCount = CrawledPage::where('website_id', $website->id)->count();
+
                 $crawledSignals = [
                     'reachable' => true,
+                    'has_https' => str_starts_with(strtolower((string) ($home->url ?? $website->target_url)), 'https://'),
                     'http_status' => $home->status_code,
                     'page_title' => $home->page_title,
+                    'title_length' => $home->page_title ? mb_strlen((string) $home->page_title) : 0,
                     'meta_description' => $home->meta_description,
+                    'meta_description_length' => $home->meta_description ? mb_strlen((string) $home->meta_description) : 0,
                     'h1_tags' => $home->h1_tags ?? [],
+                    'h1_count' => is_array($home->h1_tags) ? count($home->h1_tags) : 0,
+                    'h2_tags' => array_slice($h2Tags, 0, 10),
+                    'h2_count' => count($h2Tags),
+                    'h3_count' => $h3Count,
                     'word_count' => $home->word_count,
                     'structured_data_types' => $home->structured_data['types'] ?? [],
-                    'internal_links_count' => $home->internal_links_count,
+                    'images_count' => $imgCount,
+                    'images_missing_alt' => $imgMiss,
+                    'image_alt_coverage_pct' => $altPct,
+                    'internal_links_count' => $home->internal_links_count ?? 0,
+                    'external_links_count' => $home->external_links_count ?? 0,
+                    'has_canonical' => !empty($home->canonical_url),
+                    'has_open_graph' => !empty($home->open_graph['title'] ?? null) || !empty($home->open_graph['image'] ?? null),
+                    'has_viewport' => !empty($home->viewport),
+                    'has_sitemap' => $crawledCount > 1,
+                    'has_blog_section' => (bool) preg_match('#/(blog|articles?|news|guides?|resources)\b#i', $allUrlsBlob),
                     'load_time_ms' => $home->load_time_ms,
-                    'crawled_pages_count' => CrawledPage::where('website_id', $website->id)->count(),
+                    'crawled_pages_count' => $crawledCount,
                 ];
+                $crawledSignals['onpage_seo_score'] = FirstPartyCrawlProvider::computeOnPageSeoScore($crawledSignals);
+
                 if (empty($topPages)) {
-                    $topPages = $targetPages->take(10)->map(fn (CrawledPage $p) => [
+                    $topPages = $targetPages->take(12)->map(fn (CrawledPage $p) => [
                         'url' => $p->url,
                         'title' => $p->page_title ?: $p->url,
                         'word_count' => $p->word_count,
@@ -112,7 +148,24 @@ class DomainComparisonService
                         'source' => 'first_party_crawl',
                     ])->values()->toArray();
                 }
-                $indexedPages = $indexedPages ?? $crawledSignals['crawled_pages_count'];
+                $indexedPages = $indexedPages ?? $crawledCount;
+            } else {
+                // Live first-party inspection of target domain if Site Audit hasn't run yet
+                $fp = $this->providerManager->getFirstPartyProvider();
+                $fpRes = $this->providerManager->cachedCall(
+                    $website,
+                    'domain_metrics',
+                    "fp_crawl:{$domain}",
+                    "first_party_crawl:{$domain}",
+                    fn () => $fp->fetchDomainMetrics($domain, $country, $language),
+                    $forceRefresh
+                );
+                $fpMetrics = $fpRes['metrics'] ?? [];
+                $crawledSignals = $fpMetrics['crawled_signals'] ?? [];
+                if (empty($topPages) && !empty($fpMetrics['top_pages'])) {
+                    $topPages = $fpMetrics['top_pages'];
+                }
+                $indexedPages = $indexedPages ?? ($fpMetrics['indexed_pages_count'] ?? null);
             }
 
             // First-party verified Google Search Console performance (if connected)
@@ -169,6 +222,92 @@ class DomainComparisonService
             $indexedPages = $indexedPages ?? ($fpMetrics['indexed_pages_count'] ?? null);
             if ($classification === 'third_party_estimate' && !empty($crawledSignals['reachable'])) {
                 $classification = 'hybrid';
+            }
+        }
+
+        // 3. Enrich with live Google Index (site:domain) & Public Web Mentions when Serper.dev / SERP provider is connected!
+        if ($this->providerManager->hasExternalProviderFor('serp')) {
+            $serpProv = $this->providerManager->resolveForCapability('serp');
+            if ($serpProv->getName() === 'serper' || $serpProv->getName() === 'serpapi') {
+                // 3a. Real Google-indexed pages (site:domain)
+                $siteRes = $this->providerManager->cachedCall(
+                    $website,
+                    'serp',
+                    "{$serpProv->getName()}:site:{$domain}:{$country}",
+                    "google_index:{$domain}",
+                    fn () => $serpProv->fetchSerp("site:{$domain}", $country, $language, 'desktop'),
+                    $forceRefresh
+                );
+                if (($siteRes['available'] ?? false) && !empty($siteRes['organic_results'])) {
+                    $googlePages = [];
+                    foreach ($siteRes['organic_results'] as $row) {
+                        $googlePages[] = [
+                            'url' => $row['url'] ?? '',
+                            'title' => $row['title'] ?? '',
+                            'snippet' => $row['snippet'] ?? '',
+                            'estimated_traffic' => null,
+                            'source' => $serpProv->getName() . '_google_index',
+                        ];
+                    }
+                    $crawledSignals['google_indexed_sample_count'] = count($googlePages);
+                    // Fill homepage title/description from Google index if direct crawl hit WAF
+                    if (empty($crawledSignals['page_title']) && !empty($googlePages[0]['title'])) {
+                        $crawledSignals['page_title'] = $googlePages[0]['title'];
+                        $crawledSignals['title_length'] = mb_strlen($googlePages[0]['title']);
+                    }
+                    if (empty($crawledSignals['meta_description']) && !empty($googlePages[0]['snippet'])) {
+                        $crawledSignals['meta_description'] = $googlePages[0]['snippet'];
+                        $crawledSignals['meta_description_length'] = mb_strlen($googlePages[0]['snippet']);
+                    }
+                    // Merge Google-indexed pages into top_pages (deduplicated by URL)
+                    $existingUrls = array_flip(array_map(fn ($p) => (string) ($p['url'] ?? ''), $topPages));
+                    foreach ($googlePages as $gp) {
+                        if (!empty($gp['url']) && !isset($existingUrls[$gp['url']])) {
+                            $topPages[] = $gp;
+                            $existingUrls[$gp['url']] = true;
+                        }
+                    }
+                    $topPages = array_slice($topPages, 0, 15);
+                    if ($indexedPages === null || $indexedPages < count($googlePages)) {
+                        $indexedPages = count($googlePages);
+                    }
+                    if ($dataSource === 'first_party_crawl') {
+                        $dataSource = 'first_party_crawl+' . $serpProv->getName();
+                        $classification = 'hybrid';
+                    }
+                }
+
+                // 3b. Real Google public web mentions / brand citations ("domain" -site:domain)
+                $mentionRes = $this->providerManager->cachedCall(
+                    $website,
+                    'serp',
+                    "{$serpProv->getName()}:mentions:{$domain}:{$country}",
+                    "web_mentions:{$domain}",
+                    fn () => $serpProv->fetchSerp("\"{$domain}\" -site:{$domain}", $country, $language, 'desktop'),
+                    $forceRefresh
+                );
+                if ($mentionRes['available'] ?? false) {
+                    $mentions = [];
+                    $seenMentionHosts = [];
+                    foreach ($mentionRes['organic_results'] ?? [] as $mRow) {
+                        $mHost = CompetitorDomain::normalizeDomain((string) ($mRow['domain'] ?? ''));
+                        if ($mHost === '' || $mHost === $domain || isset($seenMentionHosts[$mHost])) {
+                            continue;
+                        }
+                        $seenMentionHosts[$mHost] = true;
+                        $mentions[] = [
+                            'domain' => $mHost,
+                            'url' => $mRow['url'] ?? '',
+                            'title' => $mRow['title'] ?? '',
+                            'snippet' => $mRow['snippet'] ?? '',
+                        ];
+                    }
+                    $crawledSignals['web_mentions_count'] = count($mentions);
+                    $crawledSignals['web_mentions'] = array_slice($mentions, 0, 12);
+                }
+
+                // Recompute on-page SEO score with Google index signals included
+                $crawledSignals['onpage_seo_score'] = FirstPartyCrawlProvider::computeOnPageSeoScore($crawledSignals);
             }
         }
 

@@ -266,6 +266,8 @@ Route::prefix('v1')->group(function () {
                 Route::post('/analyze', [CompetitorAnalysisController::class, 'launchAnalysis'])->middleware(['org.role:seo_manager', 'throttle:20,1']);
                 Route::get('/jobs', [CompetitorAnalysisController::class, 'listJobs']);
                 Route::get('/comparison', [CompetitorAnalysisController::class, 'comparison']);
+                Route::get('/{competitor}/deep-dive', [CompetitorAnalysisController::class, 'deepDive']);
+                Route::post('/{competitor}/deep-dive/save-action', [CompetitorAnalysisController::class, 'saveDeepDiveAction'])->middleware('org.role:editor');
 
                 Route::get('/keyword-gap', [CompetitorAnalysisController::class, 'keywordGap']);
                 Route::post('/keyword-gap/{keyword}/save-action', [CompetitorAnalysisController::class, 'saveKeywordToActionPlan'])->middleware('org.role:editor');

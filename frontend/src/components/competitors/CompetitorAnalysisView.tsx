@@ -20,6 +20,7 @@ import { ALL_LANGUAGES } from '@/lib/countries';
 import { useToast } from '@/context/ToastContext';
 import { CountryMultiSelect } from './CountryMultiSelect';
 import { CompetitorOverviewTab, MyCompetitorsTab } from './CompetitorDiscoveryAndListTabs';
+import { CompetitorDeepDivePanel } from './CompetitorDeepDivePanel';
 import { DomainComparisonTab, KeywordGapTab, ContentGapTab } from './DomainComparisonAndGapsTabs';
 import {
   BacklinkGapTab,
@@ -69,6 +70,7 @@ export function CompetitorAnalysisView({
   const [language, setLanguage] = useState<string>('en');
   const [overview, setOverview] = useState<any>(null);
   const [competitors, setCompetitors] = useState<CompetitorDomainItem[]>([]);
+  const [selectedDeepDiveId, setSelectedDeepDiveId] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
 
@@ -76,6 +78,7 @@ export function CompetitorAnalysisView({
     if (website) {
       setCountries([(website.target_country || 'US').toUpperCase()]);
       setLanguage((website.preferred_language || 'en').toLowerCase());
+      setSelectedDeepDiveId(null);
     }
   }, [website]);
 
@@ -186,11 +189,14 @@ export function CompetitorAnalysisView({
       <div className="flex items-center gap-1.5 overflow-x-auto pb-2 border-b border-zinc-800">
         {SUB_TABS.map((tab) => {
           const Icon = tab.icon;
-          const active = activeSubTab === tab.id;
+          const active = activeSubTab === tab.id && selectedDeepDiveId === null;
           return (
             <button
               key={tab.id}
-              onClick={() => setActiveSubTab(tab.id)}
+              onClick={() => {
+                setSelectedDeepDiveId(null);
+                setActiveSubTab(tab.id);
+              }}
               className={`shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium transition border ${
                 active
                   ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
@@ -204,68 +210,86 @@ export function CompetitorAnalysisView({
         })}
       </div>
 
-      {/* Active Submodule Content */}
-      {activeSubTab === 'overview' && (
-        <CompetitorOverviewTab
-          website={website}
-          overview={overview}
-          isLoading={isLoading}
-          isAnalyzing={isAnalyzing}
-          onLaunchAnalysis={handleLaunchFullAnalysis}
-          onSwitchSubTab={(t) => setActiveSubTab(t as SubTabId)}
-          onRefresh={loadCoreData}
-        />
-      )}
-
-      {activeSubTab === 'my_competitors' && (
-        <MyCompetitorsTab
-          website={website}
-          country={country}
-          countries={countries}
-          onCountriesChange={setCountries}
-          language={language}
-          competitors={competitors}
-          onRefresh={loadCoreData}
-        />
-      )}
-
-      {activeSubTab === 'comparison' && (
-        <DomainComparisonTab
+      {/* Head-to-Head Competitor Deep Dive Panel (when a specific competitor is selected) */}
+      {selectedDeepDiveId !== null ? (
+        <CompetitorDeepDivePanel
           website={website}
           competitors={competitors}
-          onLaunchAnalysis={handleLaunchFullAnalysis}
-          isAnalyzing={isAnalyzing}
-        />
-      )}
-
-      {activeSubTab === 'keyword_gap' && (
-        <KeywordGapTab
-          website={website}
-          competitors={competitors}
-          country={country}
-          language={language}
+          selectedCompetitorId={selectedDeepDiveId}
+          onSelectCompetitor={(id) => setSelectedDeepDiveId(id)}
+          onClose={() => setSelectedDeepDiveId(null)}
           onNavigateToActionPlan={onNavigateToActionPlan}
+          onDataUpdated={loadCoreData}
         />
+      ) : (
+        <>
+          {/* Active Submodule Content */}
+          {activeSubTab === 'overview' && (
+            <CompetitorOverviewTab
+              website={website}
+              overview={overview}
+              isLoading={isLoading}
+              isAnalyzing={isAnalyzing}
+              onLaunchAnalysis={handleLaunchFullAnalysis}
+              onSwitchSubTab={(t) => setActiveSubTab(t as SubTabId)}
+              onSelectCompetitor={(id) => setSelectedDeepDiveId(id)}
+              onRefresh={loadCoreData}
+            />
+          )}
+
+          {activeSubTab === 'my_competitors' && (
+            <MyCompetitorsTab
+              website={website}
+              country={country}
+              countries={countries}
+              onCountriesChange={setCountries}
+              language={language}
+              competitors={competitors}
+              onSelectCompetitor={(id) => setSelectedDeepDiveId(id)}
+              onRefresh={loadCoreData}
+            />
+          )}
+
+          {activeSubTab === 'comparison' && (
+            <DomainComparisonTab
+              website={website}
+              competitors={competitors}
+              onLaunchAnalysis={handleLaunchFullAnalysis}
+              onSelectCompetitor={(id) => setSelectedDeepDiveId(id)}
+              isAnalyzing={isAnalyzing}
+            />
+          )}
+
+          {activeSubTab === 'keyword_gap' && (
+            <KeywordGapTab
+              website={website}
+              competitors={competitors}
+              country={country}
+              language={language}
+              onNavigateToActionPlan={onNavigateToActionPlan}
+            />
+          )}
+
+          {activeSubTab === 'content_gap' && (
+            <ContentGapTab
+              website={website}
+              onNavigateToContent={onNavigateToContent}
+            />
+          )}
+
+          {activeSubTab === 'backlink_gap' && <BacklinkGapTab website={website} />}
+
+          {activeSubTab === 'serp_analysis' && (
+            <SerpAnalysisTab website={website} country={country} language={language} />
+          )}
+
+          {activeSubTab === 'ai_strategy' && (
+            <AiStrategyTab website={website} onNavigateToActionPlan={onNavigateToActionPlan} />
+          )}
+
+          {activeSubTab === 'history' && <CompetitorHistoryTab website={website} />}
+        </>
       )}
-
-      {activeSubTab === 'content_gap' && (
-        <ContentGapTab
-          website={website}
-          onNavigateToContent={onNavigateToContent}
-        />
-      )}
-
-      {activeSubTab === 'backlink_gap' && <BacklinkGapTab website={website} />}
-
-      {activeSubTab === 'serp_analysis' && (
-        <SerpAnalysisTab website={website} country={country} language={language} />
-      )}
-
-      {activeSubTab === 'ai_strategy' && (
-        <AiStrategyTab website={website} onNavigateToActionPlan={onNavigateToActionPlan} />
-      )}
-
-      {activeSubTab === 'history' && <CompetitorHistoryTab website={website} />}
     </div>
   );
 }

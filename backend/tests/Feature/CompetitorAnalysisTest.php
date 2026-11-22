@@ -759,4 +759,136 @@ class CompetitorAnalysisTest extends TestCase
         $this->assertEquals(['BD'], $multiCandidates->firstWhere('domain', 'caregiveragencybd.com')['matched_countries']);
         $this->assertEquals(['AE'], $multiCandidates->firstWhere('domain', 'dubaicaregivers.ae')['matched_countries']);
     }
+
+    public function test_competitor_deep_dive_compares_head_to_head_and_saves_improvement_to_action_plan(): void
+    {
+        config([
+            'competitors.providers.dataforseo.login' => '',
+            'competitors.providers.dataforseo.password' => '',
+            'competitors.providers.semrush.api_key' => '',
+            'competitors.providers.ahrefs.api_key' => '',
+            'competitors.providers.serpapi.api_key' => '',
+            'competitors.providers.serper.api_key' => 'test_serper_key',
+        ]);
+
+        // Seed target CrawledPage with thin content and 0 schema
+        $crawlJob = CrawlJob::create([
+            'organization_id' => $this->org->id,
+            'website_id' => $this->website->id,
+            'initiated_by' => $this->seoManager->id,
+            'status' => CrawlJob::STATUS_COMPLETED,
+        ]);
+        CrawledPage::create([
+            'organization_id' => $this->org->id,
+            'website_id' => $this->website->id,
+            'crawl_job_id' => $crawlJob->id,
+            'url' => 'https://carematebd.com',
+            'status_code' => 200,
+            'page_title' => 'CareMate BD',
+            'meta_description' => 'Short desc',
+            'h1_tags' => ['CareMate BD'],
+            'word_count' => 180,
+            'structured_data' => ['count' => 0, 'types' => []],
+            'load_time_ms' => 1800,
+            'is_indexable' => true,
+        ]);
+
+        $comp = CompetitorDomain::create([
+            'organization_id' => $this->org->id,
+            'website_id' => $this->website->id,
+            'domain' => 'songjogcare.com',
+            'display_name' => 'Songjog Care',
+            'category' => 'direct',
+            'tier' => 'primary',
+            'country' => 'BD',
+            'language' => 'en',
+        ]);
+
+        $richCompHtml = '<html><head>'
+            . '<title>Songjog Care | Trusted Elderly Care &amp; Home Nursing in Dhaka Bangladesh</title>'
+            . '<meta name="description" content="24/7 verified elderly care, dementia caregivers, and home nursing services in Dhaka and across Bangladesh.">'
+            . '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            . '<link rel="canonical" href="https://songjogcare.com">'
+            . '<meta property="og:title" content="Songjog Care">'
+            . '<script type="application/ld+json">{"@context":"https://schema.org","@type":"LocalBusiness","name":"Songjog Care"}</script>'
+            . '<script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage"}</script>'
+            . '</head><body>'
+            . '<h1>Trusted Senior Care in Dhaka</h1>'
+            . '<h2>Elderly Care Packages</h2><h2>Dementia Care</h2><h2>Home Nursing</h2><h2>FAQ</h2>'
+            . '<a href="https://songjogcare.com/dementia-care">Dementia Care</a>'
+            . '<a href="https://songjogcare.com/blog">Caregiver Blog</a>'
+            . '<a href="tel:+8801700000000">Call Now</a>'
+            . '<p>' . str_repeat('Verified elderly caregiver and home nursing services in Dhaka Bangladesh. ', 75) . '</p>'
+            . '</body></html>';
+
+        Http::fake([
+            'https://songjogcare.com' => Http::response($richCompHtml, 200),
+            'https://songjogcare.com/sitemap.xml' => Http::response(
+                '<urlset><url><loc>https://songjogcare.com/</loc></url><url><loc>https://songjogcare.com/dementia-care</loc></url><url><loc>https://songjogcare.com/physiotherapy-dhaka</loc></url></urlset>',
+                200
+            ),
+            'https://google.serper.dev/search' => function ($request) {
+                $q = (string) ($request->data()['q'] ?? '');
+                if (str_contains($q, '-site:songjogcare.com')) {
+                    return Http::response([
+                        'organic' => [
+                            ['position' => 1, 'link' => 'https://bdhealthdirectory.com/songjog-care', 'title' => 'Songjog Care Listing', 'snippet' => 'Top home care provider in Dhaka.'],
+                        ],
+                    ], 200);
+                }
+                if (str_contains($q, 'site:songjogcare.com')) {
+                    return Http::response([
+                        'organic' => [
+                            ['position' => 1, 'link' => 'https://songjogcare.com/', 'title' => 'Songjog Care | Home Nursing BD', 'snippet' => 'Senior care in Dhaka.'],
+                            ['position' => 2, 'link' => 'https://songjogcare.com/dementia-care', 'title' => 'Dementia Care Service in Dhaka', 'snippet' => 'Specialized dementia caregivers.'],
+                            ['position' => 3, 'link' => 'https://songjogcare.com/physiotherapy-dhaka', 'title' => 'Home Physiotherapy in Dhaka', 'snippet' => 'Licensed home physiotherapists.'],
+                        ],
+                    ], 200);
+                }
+                if (str_contains($q, '-site:carematebd.com')) {
+                    return Http::response(['organic' => []], 200);
+                }
+                if (str_contains($q, 'site:carematebd.com')) {
+                    return Http::response([
+                        'organic' => [
+                            ['position' => 1, 'link' => 'https://carematebd.com/', 'title' => 'CareMate BD', 'snippet' => 'Caregivers in Dhaka.'],
+                        ],
+                    ], 200);
+                }
+                return Http::response([
+                    'organic' => [
+                        ['position' => 2, 'link' => 'https://songjogcare.com/', 'title' => 'Songjog Care', 'snippet' => 'Home nursing Dhaka.'],
+                    ],
+                ], 200);
+            },
+        ]);
+
+        // 1. Fetch Head-to-Head Deep Dive Report
+        $res = $this->actingAs($this->seoManager)
+            ->withHeaders($this->authHeaders($this->seoManager, $this->org))
+            ->getJson("/api/v1/websites/{$this->website->id}/competitors/{$comp->id}/deep-dive");
+
+        $res->assertOk();
+        $data = $res->json('data');
+
+        $this->assertNotNull($data['competitor']['seo_score']);
+        $this->assertGreaterThan($data['target']['seo_score'], $data['competitor']['seo_score']);
+        $this->assertNotEmpty($data['scorecard']);
+        $this->assertNotEmpty($data['improvements']);
+        $this->assertGreaterThan(0, $data['summary']['gaps']);
+        $this->assertNotEmpty($data['citation_opportunities']);
+        $this->assertEquals('bdhealthdirectory.com', $data['citation_opportunities'][0]['domain']);
+
+        // 2. Save first improvement directly into SEO Action Plan
+        $firstImp = $data['improvements'][0];
+        $saveRes = $this->actingAs($this->seoManager)
+            ->withHeaders($this->authHeaders($this->seoManager, $this->org))
+            ->postJson("/api/v1/websites/{$this->website->id}/competitors/{$comp->id}/deep-dive/save-action", $firstImp);
+
+        $saveRes->assertStatus(201);
+        $this->assertDatabaseHas('ai_recommendations', [
+            'website_id' => $this->website->id,
+            'title' => $firstImp['title'],
+        ]);
+    }
 }
