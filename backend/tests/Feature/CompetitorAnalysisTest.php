@@ -597,4 +597,64 @@ class CompetitorAnalysisTest extends TestCase
         // Direct rivals must be sorted ahead of filtered portals
         $this->assertEquals('direct', $candidates->first()['category']);
     }
+
+    public function test_serper_google_discovery_uses_indexed_site_meta_when_homepage_has_waf_interstitial(): void
+    {
+        config([
+            'competitors.providers.dataforseo.login' => '',
+            'competitors.providers.dataforseo.password' => '',
+            'competitors.providers.semrush.api_key' => '',
+            'competitors.providers.ahrefs.api_key' => '',
+            'competitors.providers.serpapi.api_key' => '',
+            'competitors.providers.serper.api_key' => 'test_serper_key',
+        ]);
+
+        Http::fake([
+            'https://carematebd.com*' => Http::response('<html><head><title>One moment, please...</title></head><body></body></html>', 200),
+            'https://google.serper.dev/search' => function ($request) {
+                $q = (string) ($request->data()['q'] ?? '');
+                if (str_starts_with($q, 'site:')) {
+                    return Http::response([
+                        'organic' => [[
+                            'position' => 1,
+                            'link' => 'https://carematebd.com',
+                            'title' => 'CareMate BD — Trusted Caregivers for Elderly, Child, & Nursing Care in Bangladesh',
+                            'snippet' => 'Find background-verified caregivers in Dhaka and across Bangladesh.',
+                        ]],
+                    ], 200);
+                }
+
+                return Http::response([
+                    'organic' => [
+                        [
+                            'position' => 1,
+                            'link' => 'https://caregiveragencybd.com/services',
+                            'title' => 'Caregiver Agency BD | Elderly & Nursing Care in Bangladesh',
+                            'snippet' => 'Trusted home nursing and elderly caregiver service in Dhaka Bangladesh.',
+                        ],
+                        [
+                            'position' => 2,
+                            'link' => 'https://claracareservices.com',
+                            'title' => 'Clara Care Services | Home Nursing Care Bangladesh',
+                            'snippet' => '24/7 home nursing and elderly caregiver agency in Dhaka.',
+                        ],
+                    ],
+                ], 200);
+            },
+        ]);
+
+        $res = $this->actingAs($this->seoManager)
+            ->withHeaders($this->authHeaders($this->seoManager, $this->org))
+            ->postJson("/api/v1/websites/{$this->website->id}/competitors/discover", [
+                'country' => 'BD',
+                'language' => 'en',
+                'force_refresh' => true,
+            ]);
+
+        $res->assertStatus(201)->assertJsonPath('data.provider', 'serper');
+        $candidates = collect($res->json('data.candidates'));
+        $this->assertEquals('direct', $candidates->firstWhere('domain', 'caregiveragencybd.com')['category']);
+        $this->assertEquals('direct', $candidates->firstWhere('domain', 'claracareservices.com')['category']);
+        $this->assertStringContainsString('caregivers', strtolower((string) $res->json('data.methodology')));
+    }
 }

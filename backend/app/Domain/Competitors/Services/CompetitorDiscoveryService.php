@@ -336,6 +336,19 @@ class CompetitorDiscoveryService
             }
         }
 
+        // 2b. If homepage is behind a WAF interstitial and no explicit industry hint was given, read Google's indexed snippet via configured SERP provider (site:domain)
+        if ($homepageTitle === '' && empty($industryContext) && $this->providerManager->hasExternalProviderFor('serp')) {
+            $serpProv = $this->providerManager->resolveForCapability('serp');
+            $indexed = $serpProv->fetchSerp("site:{$targetDomain}", $country, $website->preferred_language ?: 'en');
+            if (($indexed['available'] ?? false) && !empty($indexed['organic_results'])) {
+                $firstHit = $indexed['organic_results'][0];
+                $homepageTitle = trim((string) ($firstHit['title'] ?? ''));
+                if ($homepageDesc === '') {
+                    $homepageDesc = trim((string) ($firstHit['snippet'] ?? ''));
+                }
+            }
+        }
+
         $slugPhrase = implode(' ', array_slice(array_unique($urlSlugWords), 0, 5));
 
         // 3. Extract clean title segment (strip brand prefix/suffix separated by —, |, -, :)

@@ -62,15 +62,21 @@ class SerperProvider implements CompetitorProviderInterface
 
         $domainStats = [];
         $targetNorm = preg_replace('/^www\./i', '', strtolower($domain));
+        $succeededQueries = 0;
+        $lastError = null;
+        $totalCost = 0.0;
 
         foreach ($queries as $q) {
             $serp = $this->fetchSerp((string) $q, $country, $language, 'desktop');
             if (!($serp['available'] ?? false)) {
+                $lastError = $serp['error'] ?? 'Serper.dev query failed.';
                 continue;
             }
+            $succeededQueries++;
+            $totalCost += (float) ($serp['cost_usd'] ?? 0.001);
             foreach ($serp['organic_results'] as $row) {
                 $d = preg_replace('/^www\./i', '', strtolower((string) ($row['domain'] ?? '')));
-                if ($d === '' || $d === $targetNorm || !str_contains($d, '.')) {
+                if ($d === '' || $d === $targetNorm || !str_contains($d, '.') || str_ends_with($d, '.' . $targetNorm)) {
                     continue;
                 }
                 if (!isset($domainStats[$d])) {
@@ -96,7 +102,19 @@ class SerperProvider implements CompetitorProviderInterface
             }
         }
 
-        $totalQueries = max(1, count($queries));
+        if ($succeededQueries === 0) {
+            return [
+                'available' => false,
+                'provider' => $this->getName(),
+                'methodology' => 'Serper.dev Google Organic SERP discovery failed for queries: ' . implode(' | ', $queries),
+                'candidates' => [],
+                'queries_used' => $queries,
+                'error' => $lastError ?: 'Serper.dev returned no successful search responses.',
+                'cost_usd' => 0.0,
+            ];
+        }
+
+        $totalQueries = max(1, $succeededQueries);
         $candidates = [];
         foreach ($domainStats as $stat) {
             $avgPos = round(array_sum($stat['positions']) / max(1, count($stat['positions'])), 1);
@@ -118,9 +136,10 @@ class SerperProvider implements CompetitorProviderInterface
         return [
             'available' => true,
             'provider' => $this->getName(),
-            'methodology' => 'Serper.dev Google Organic SERP overlap across ' . count($queries) . " targeted service queries ({$country}/{$language}): " . implode(' | ', $queries),
-            'candidates' => array_slice($candidates, 0, 20),
+            'methodology' => 'Serper.dev live Google Organic SERP overlap across ' . $succeededQueries . " targeted service queries ({$country}/{$language}): " . implode(' | ', $queries),
+            'candidates' => array_slice($candidates, 0, 25),
             'queries_used' => $queries,
+            'cost_usd' => $totalCost,
         ];
     }
 
