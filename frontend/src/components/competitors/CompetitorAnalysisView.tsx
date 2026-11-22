@@ -16,7 +16,9 @@ import {
 } from 'lucide-react';
 import { Website, CompetitorDomainItem } from '@/types';
 import { api } from '@/lib/api';
+import { ALL_LANGUAGES } from '@/lib/countries';
 import { useToast } from '@/context/ToastContext';
+import { CountryMultiSelect } from './CountryMultiSelect';
 import { CompetitorOverviewTab, MyCompetitorsTab } from './CompetitorDiscoveryAndListTabs';
 import { DomainComparisonTab, KeywordGapTab, ContentGapTab } from './DomainComparisonAndGapsTabs';
 import {
@@ -62,7 +64,8 @@ export function CompetitorAnalysisView({
 }: CompetitorAnalysisViewProps) {
   const toast = useToast();
   const [activeSubTab, setActiveSubTab] = useState<SubTabId>('overview');
-  const [country, setCountry] = useState<string>('US');
+  const [countries, setCountries] = useState<string[]>(['US']);
+  const country = countries[0] || 'US';
   const [language, setLanguage] = useState<string>('en');
   const [overview, setOverview] = useState<any>(null);
   const [competitors, setCompetitors] = useState<CompetitorDomainItem[]>([]);
@@ -71,7 +74,7 @@ export function CompetitorAnalysisView({
 
   useEffect(() => {
     if (website) {
-      setCountry((website.target_country || 'US').toUpperCase());
+      setCountries([(website.target_country || 'US').toUpperCase()]);
       setLanguage((website.preferred_language || 'en').toLowerCase());
     }
   }, [website]);
@@ -153,22 +156,7 @@ export function CompetitorAnalysisView({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 text-xs">
-          <select
-            value={country}
-            onChange={(e) => setCountry(e.target.value)}
-            className="bg-zinc-900 border border-zinc-800 rounded-xl px-2.5 py-2 text-zinc-200"
-            aria-label="Target Country"
-          >
-            <option value="US">US (United States)</option>
-            <option value="GB">GB (United Kingdom)</option>
-            <option value="CA">CA (Canada)</option>
-            <option value="AU">AU (Australia)</option>
-            <option value="BD">BD (Bangladesh)</option>
-            <option value="IN">IN (India)</option>
-            <option value="DE">DE (Germany)</option>
-            <option value="AE">AE (UAE)</option>
-            <option value="SG">SG (Singapore)</option>
-          </select>
+          <CountryMultiSelect selected={countries} onChange={setCountries} maxSelection={5} />
 
           <select
             value={language}
@@ -176,11 +164,11 @@ export function CompetitorAnalysisView({
             className="bg-zinc-900 border border-zinc-800 rounded-xl px-2.5 py-2 text-zinc-200"
             aria-label="Target Language"
           >
-            <option value="en">EN</option>
-            <option value="bn">BN</option>
-            <option value="de">DE</option>
-            <option value="fr">FR</option>
-            <option value="es">ES</option>
+            {ALL_LANGUAGES.map((l) => (
+              <option key={l.code} value={l.code}>
+                {l.label}
+              </option>
+            ))}
           </select>
 
           <button
@@ -233,6 +221,8 @@ export function CompetitorAnalysisView({
         <MyCompetitorsTab
           website={website}
           country={country}
+          countries={countries}
+          onCountriesChange={setCountries}
           language={language}
           competitors={competitors}
           onRefresh={loadCoreData}

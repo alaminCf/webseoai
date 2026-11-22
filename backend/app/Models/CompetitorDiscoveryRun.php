@@ -15,6 +15,7 @@ class CompetitorDiscoveryRun extends Model
         'website_id',
         'initiated_by',
         'country',
+        'countries',
         'language',
         'search_engine',
         'industry_context',
@@ -27,6 +28,7 @@ class CompetitorDiscoveryRun extends Model
     ];
 
     protected $casts = [
+        'countries' => 'array',
         'candidates' => 'array',
         'completed_at' => 'datetime',
     ];

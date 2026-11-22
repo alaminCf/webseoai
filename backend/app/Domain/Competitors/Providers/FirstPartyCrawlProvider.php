@@ -3,6 +3,7 @@
 namespace App\Domain\Competitors\Providers;
 
 use App\Domain\Competitors\Contracts\CompetitorProviderInterface;
+use App\Domain\Competitors\Support\CountryCatalog;
 use App\Domain\Crawler\PageInspector;
 use App\Domain\Crawler\UrlSecurityValidator;
 use Illuminate\Support\Facades\Http;
@@ -216,11 +217,7 @@ class FirstPartyCrawlProvider implements CompetitorProviderInterface
      */
     private function searchPublicDuckDuckGo(string $query, string $country): array
     {
-        $klMap = [
-            'US' => 'us-en', 'GB' => 'uk-en', 'CA' => 'ca-en', 'AU' => 'au-en',
-            'IN' => 'in-en', 'DE' => 'de-de', 'FR' => 'fr-fr', 'SG' => 'sg-en',
-        ];
-        $kl = $klMap[strtoupper($country)] ?? 'wt-wt';
+        $kl = CountryCatalog::ddgKl($country);
 
         try {
             $res = Http::withHeaders([

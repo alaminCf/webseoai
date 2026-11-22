@@ -3,6 +3,7 @@
 namespace App\Domain\Competitors\Services;
 
 use App\Domain\Competitors\CompetitorProviderManager;
+use App\Domain\Competitors\Support\CountryCatalog;
 use App\Domain\Crawler\UrlSecurityValidator;
 use App\Models\CompetitorDiscoveryRun;
 use App\Models\CompetitorDomain;
@@ -15,33 +16,6 @@ use Throwable;
 
 class CompetitorDiscoveryService
 {
-    private const COUNTRY_NAMES = [
-        'US' => 'USA',
-        'GB' => 'UK',
-        'UK' => 'UK',
-        'BD' => 'Bangladesh',
-        'IN' => 'India',
-        'CA' => 'Canada',
-        'AU' => 'Australia',
-        'PK' => 'Pakistan',
-        'AE' => 'UAE',
-        'SG' => 'Singapore',
-        'MY' => 'Malaysia',
-        'DE' => 'Germany',
-        'FR' => 'France',
-        'NL' => 'Netherlands',
-        'ES' => 'Spain',
-        'IT' => 'Italy',
-        'BR' => 'Brazil',
-        'JP' => 'Japan',
-        'ID' => 'Indonesia',
-        'PH' => 'Philippines',
-        'SA' => 'Saudi Arabia',
-        'NZ' => 'New Zealand',
-        'ZA' => 'South Africa',
-        'NG' => 'Nigeria',
-    ];
-
     private const STOP_WORDS = [
         'the', 'and', 'for', 'with', 'from', 'that', 'this', 'your', 'our', 'their', 'into', 'over', 'about',
         'more', 'most', 'very', 'just', 'only', 'also', 'here', 'there', 'when', 'where', 'what', 'which',
@@ -53,14 +27,7 @@ class CompetitorDiscoveryService
         'peace', 'mind', 'loved', 'ones', 'coordinated', 'admin', 'affordable', 'easy', 'fast', 'free',
         'home', 'homepage', 'index', 'com', 'org', 'net', 'www', 'http', 'https', 'inc', 'ltd', 'llc',
         'services', 'service', 'solutions', 'solution', 'company', 'platform', 'agency', 'providers', 'provider',
-    ];
-
-    private const KNOWN_CITIES = [
-        'dhaka', 'chittagong', 'chattogram', 'sylhet', 'khulna', 'rajshahi', 'gulshan', 'banani', 'uttara', 'dhanmondi',
-        'london', 'manchester', 'birmingham', 'new york', 'los angeles', 'chicago', 'houston', 'miami', 'austin', 'seattle',
-        'toronto', 'vancouver', 'montreal', 'sydney', 'melbourne', 'brisbane', 'mumbai', 'delhi', 'bangalore', 'bengaluru',
-        'hyderabad', 'chennai', 'kolkata', 'dubai', 'abu dhabi', 'singapore', 'kuala lumpur', 'karachi', 'lahore', 'islamabad',
-        'berlin', 'munich', 'paris', 'amsterdam', 'tokyo', 'jakarta', 'manila', 'riyadh', 'jeddah',
+        'minutes', 'hours', 'days', 'years', 'near',
     ];
 
     public function __construct(private CompetitorProviderManager $providerManager)
@@ -68,8 +35,10 @@ class CompetitorDiscoveryService
     }
 
     /**
-     * Run intelligent competitor discovery.
+     * Run intelligent competitor discovery across one or more target countries.
      * Candidates are stored on the discovery run and require manual confirmation before adding.
+     *
+     * @param string[] $countries Optional list of ISO-2 country codes (up to 5).
      */
     public function discover(
         Website $website,
@@ -78,35 +47,108 @@ class CompetitorDiscoveryService
         string $language = 'en',
         string $searchEngine = 'google',
         ?string $industryContext = null,
-        bool $forceRefresh = false
+        bool $forceRefresh = false,
+        array $countries = [],
+        bool $strictCountryMatch = true
     ): CompetitorDiscoveryRun {
-        $country = strtoupper(trim($country)) ?: 'US';
+        $selectedCountries = CountryCatalog::normalizeCodes(
+            !empty($countries) ? $countries : [$country],
+            $country ?: ($website->target_country ?: 'US'),
+            5
+        );
+        $primaryCountry = $selectedCountries[0];
         $language = strtolower(trim($language)) ?: 'en';
         $targetDomain = CompetitorDomain::normalizeDomain($website->domain);
         $profile = $website->contextProfile;
 
-        // Extract rich niche/service queries from user hint, crawled/live homepage, brand profile, and GSC queries
-        $topicContext = $this->extractTargetTopicContext($website, $targetDomain, $industryContext, $country);
-        $seedKeywords = $topicContext['queries'];
-        $serviceTerms = $topicContext['service_terms'];
-        $industry = $industryContext ?: $topicContext['detected_summary'];
-
         $provider = $this->providerManager->resolveForCapability('discovery');
-        $cacheSignature = "{$provider->getName()}:{$targetDomain}:{$country}:{$language}:" . md5(implode('|', $seedKeywords) . '|' . ($industry ?? ''));
 
-        $result = $this->providerManager->cachedCall(
-            $website,
-            'discovery',
-            $cacheSignature,
-            "discover:{$targetDomain}",
-            fn () => $provider->discoverCompetitors($targetDomain, $country, $language, [
-                'industry' => $industry,
-                'seed_keywords' => $seedKeywords,
-                'service_terms' => $serviceTerms,
-                'search_engine' => $searchEngine,
-            ]),
-            $forceRefresh
-        );
+        // Run country-scoped discovery for each selected country and merge candidates cleanly
+        $mergedRaw = [];
+        $allQueriesUsed = [];
+        $allServiceTerms = [];
+        $detectedSummary = $industryContext ?: null;
+        $errors = [];
+
+        // Keep per-country query budget lean when multiple countries are selected
+        $perCountryQueryLimit = count($selectedCountries) > 2 ? 2 : 3;
+
+        foreach ($selectedCountries as $cc) {
+            $topicContext = $this->extractTargetTopicContext($website, $targetDomain, $industryContext, $cc);
+            $seedKeywords = array_slice($topicContext['queries'], 0, $perCountryQueryLimit);
+            $allQueriesUsed = array_merge($allQueriesUsed, $seedKeywords);
+            $allServiceTerms = array_values(array_unique(array_merge($allServiceTerms, $topicContext['service_terms'])));
+            if (!$detectedSummary && !empty($topicContext['detected_summary'])) {
+                $detectedSummary = $topicContext['detected_summary'];
+            }
+
+            $cacheSignature = "{$provider->getName()}:{$targetDomain}:{$cc}:{$language}:" . md5(implode('|', $seedKeywords) . '|' . ($industryContext ?? ''));
+
+            $res = $this->providerManager->cachedCall(
+                $website,
+                'discovery',
+                $cacheSignature,
+                "discover:{$targetDomain}:{$cc}",
+                fn () => $provider->discoverCompetitors($targetDomain, $cc, $language, [
+                    'industry' => $industryContext ?: $topicContext['detected_summary'],
+                    'seed_keywords' => $seedKeywords,
+                    'service_terms' => $topicContext['service_terms'],
+                    'search_engine' => $searchEngine,
+                ]),
+                $forceRefresh
+            );
+
+            if (!empty($res['error'])) {
+                $errors[] = "{$cc}: {$res['error']}";
+            }
+
+            foreach ($res['candidates'] ?? [] as $cand) {
+                $candDomain = CompetitorDomain::normalizeDomain((string) ($cand['domain'] ?? ''));
+                if ($candDomain === '' || $candDomain === $targetDomain || str_ends_with($candDomain, '.' . $targetDomain)) {
+                    continue;
+                }
+
+                if (!isset($mergedRaw[$candDomain])) {
+                    $cand['domain'] = $candDomain;
+                    $cand['searched_countries'] = [$cc];
+                    $mergedRaw[$candDomain] = $cand;
+                } else {
+                    // Merge multi-country sightings of the same domain
+                    if (!in_array($cc, $mergedRaw[$candDomain]['searched_countries'], true)) {
+                        $mergedRaw[$candDomain]['searched_countries'][] = $cc;
+                    }
+                    $mergedRaw[$candDomain]['shared_keywords'] = (int) ($mergedRaw[$candDomain]['shared_keywords'] ?? 0) + (int) ($cand['shared_keywords'] ?? 0);
+                    $mergedRaw[$candDomain]['matched_queries'] = array_values(array_unique(array_merge(
+                        (array) ($mergedRaw[$candDomain]['matched_queries'] ?? []),
+                        (array) ($cand['matched_queries'] ?? [])
+                    )));
+                    $mergedRaw[$candDomain]['sample_urls'] = array_slice(array_values(array_unique(array_merge(
+                        (array) ($mergedRaw[$candDomain]['sample_urls'] ?? []),
+                        (array) ($cand['sample_urls'] ?? [])
+                    ))), 0, 4);
+                    if (isset($cand['avg_position'], $mergedRaw[$candDomain]['avg_position'])) {
+                        $mergedRaw[$candDomain]['avg_position'] = round(((float) $mergedRaw[$candDomain]['avg_position'] + (float) $cand['avg_position']) / 2, 1);
+                    }
+                }
+            }
+        }
+
+        // Also include explicit competitor hints from WebsiteContextProfile (if user previously entered them)
+        if ($profile && is_array($profile->competitors)) {
+            foreach ($profile->competitors as $hint) {
+                $norm = CompetitorDomain::normalizeDomain((string) $hint);
+                if ($norm !== '' && $norm !== $targetDomain && !isset($mergedRaw[$norm])) {
+                    $mergedRaw[$norm] = [
+                        'domain' => $norm,
+                        'shared_keywords' => null,
+                        'serp_overlap_pct' => null,
+                        'sample_urls' => [],
+                        'source' => 'brand_profile',
+                        'searched_countries' => $selectedCountries,
+                    ];
+                }
+            }
+        }
 
         $existingDomains = CompetitorDomain::where('website_id', $website->id)
             ->pluck('domain')
@@ -114,31 +156,12 @@ class CompetitorDiscoveryService
             ->toArray();
 
         $portalDomains = array_map('strtolower', config('competitors.non_direct_portal_domains', []));
-        $rawCandidates = $result['candidates'] ?? [];
-
-        // Also include explicit competitor hints from WebsiteContextProfile (if user previously entered them)
-        if ($profile && is_array($profile->competitors)) {
-            foreach ($profile->competitors as $hint) {
-                $norm = CompetitorDomain::normalizeDomain((string) $hint);
-                if ($norm !== '' && $norm !== $targetDomain && !collect($rawCandidates)->contains('domain', $norm)) {
-                    $rawCandidates[] = [
-                        'domain' => $norm,
-                        'shared_keywords' => null,
-                        'serp_overlap_pct' => null,
-                        'sample_urls' => [],
-                        'source' => 'brand_profile',
-                    ];
-                }
-            }
-        }
-
         $evaluatedCandidates = [];
-        foreach ($rawCandidates as $cand) {
-            $candDomain = CompetitorDomain::normalizeDomain((string) ($cand['domain'] ?? ''));
-            if ($candDomain === '' || $candDomain === $targetDomain || str_ends_with($candDomain, '.' . $targetDomain)) {
-                continue;
-            }
+        $filteredForeignCount = 0;
+        $filteredUnverifiedCountryCount = 0;
 
+        foreach (array_values($mergedRaw) as $cand) {
+            $candDomain = (string) $cand['domain'];
             $isPortal = $this->isPortalDomain($candDomain, $portalDomains);
             $sharedKw = isset($cand['shared_keywords']) ? (int) $cand['shared_keywords'] : null;
             $overlapPct = isset($cand['serp_overlap_pct']) ? (float) $cand['serp_overlap_pct'] : null;
@@ -148,10 +171,48 @@ class CompetitorDiscoveryService
             $sampleUrls = array_values(array_filter((array) ($cand['sample_urls'] ?? [])));
             $matchedQueries = array_values(array_filter((array) ($cand['matched_queries'] ?? [])));
             $source = (string) ($cand['source'] ?? $provider->getName());
+            $isSerpDiscovery = in_array($source, ['public_web_serp', 'public_bing_rss', 'gemini_google_search', 'serper', 'serpapi'], true);
+
+            // Strict exact-country evaluation (prevents US/UK/IN/foreign sites from leaking into Bangladesh or other countries!)
+            $countryEval = CountryCatalog::evaluateCandidateCountry(
+                $candDomain,
+                $sampleTitle,
+                $sampleSnippet,
+                $sampleUrls,
+                $selectedCountries
+            );
+
+            $matchedCountries = $countryEval['matched_countries'];
+            $countryVerified = $countryEval['country_verified'];
+            $foreignConflict = $countryEval['foreign_conflict'];
+            $countryEvidence = $countryEval['evidence'];
+
+            // For non-SERP providers (DataForSEO / Semrush domain tables, or explicit brand_profile) that have no snippet text,
+            // trust their location-scoped database unless an explicit foreign conflict (e.g. wrong ccTLD) is detected.
+            if (!$isSerpDiscovery && !$foreignConflict && empty($matchedCountries)) {
+                $matchedCountries = $cand['searched_countries'] ?? [$primaryCountry];
+                $countryVerified = true;
+                $countryEvidence[] = 'provider_geo_db:' . implode(',', $matchedCountries);
+            }
+
+            // Enforce strict country filter on SERP candidates
+            if ($strictCountryMatch && $source !== 'brand_profile') {
+                if ($foreignConflict) {
+                    $filteredForeignCount++;
+                    continue;
+                }
+                // For SERP-based discovery targeting non-US country/countries, require positive local-country verification
+                // (domain ccTLD/suffix, country name, local city, or currency) so random global/US pages never pollute results!
+                $onlyNonUsSelected = !in_array('US', $selectedCountries, true);
+                if ($isSerpDiscovery && $onlyNonUsSelected && !$countryVerified) {
+                    $filteredUnverifiedCountryCount++;
+                    continue;
+                }
+            }
 
             $isEditorial = $this->isEditorialOrMediaSite($candDomain, $sampleUrls, $sampleTitle);
-            $matchedTerms = $this->findMatchedServiceTerms($candDomain, $sampleTitle, $sampleSnippet, $serviceTerms);
-            $isSerpDiscovery = in_array($source, ['public_web_serp', 'public_bing_rss', 'gemini_google_search', 'serper', 'serpapi'], true);
+            $matchedTerms = $this->findMatchedServiceTerms($candDomain, $sampleTitle, $sampleSnippet, $allServiceTerms);
+            $countryLabel = implode(', ', array_map(fn ($c) => CountryCatalog::name($c), !empty($matchedCountries) ? $matchedCountries : $selectedCountries));
 
             // Intelligent classification: NEVER classify a generic directory/social/portal as a direct business competitor
             if ($isPortal) {
@@ -168,21 +229,23 @@ class CompetitorDiscoveryService
                 $reason = 'Editorial, news, or informational publication ranking on overlapping topic queries; classified as Content Competitor rather than Direct Business Rival.';
             } elseif (
                 ($sharedKw !== null && $sharedKw >= 5)
-                || ($isSerpDiscovery && $sharedKw !== null && $sharedKw >= 2)
-                || ($isSerpDiscovery && count($matchedTerms) >= 2 && ($avgPos === null || $avgPos <= 12))
+                || ($isSerpDiscovery && $countryVerified && $sharedKw !== null && $sharedKw >= 2)
+                || ($isSerpDiscovery && $countryVerified && count($matchedTerms) >= 1 && ($avgPos === null || $avgPos <= 15))
+                || ($isSerpDiscovery && in_array('US', $selectedCountries, true) && count($matchedTerms) >= 2 && ($avgPos === null || $avgPos <= 12))
                 || (!$isSerpDiscovery && $overlapPct !== null && $overlapPct >= 35)
             ) {
                 $category = CompetitorDomain::CATEGORY_DIRECT;
-                $rankBoost = $avgPos !== null ? max(0, (int) round((11 - min(11, $avgPos)) * 1.8)) : 6;
-                $termBoost = min(16, count($matchedTerms) * 4);
-                $queryBoost = $isSerpDiscovery ? min(20, ($sharedKw ?? 1) * 9) : min(25, (int) round(($overlapPct ?? 20) * 0.4));
-                $confidence = min(96, max(68, 56 + $rankBoost + $termBoost + $queryBoost));
+                $rankBoost = $avgPos !== null ? max(0, (int) round((12 - min(12, $avgPos)) * 1.5)) : 6;
+                $termBoost = min(14, count($matchedTerms) * 4);
+                $countryBoost = $countryVerified ? 8 : 0;
+                $queryBoost = $isSerpDiscovery ? min(18, ($sharedKw ?? 1) * 8) : min(25, (int) round(($overlapPct ?? 20) * 0.4));
+                $confidence = min(96, max(68, 52 + $rankBoost + $termBoost + $countryBoost + $queryBoost));
 
                 $parts = [];
                 if ($avgPos !== null && $sharedKw !== null) {
-                    $parts[] = "Ranked avg #{$avgPos} across {$sharedKw} target commercial " . ($sharedKw === 1 ? 'query' : 'queries') . " in {$country}/{$language}";
+                    $parts[] = "Verified {$countryLabel} competitor — ranked avg #{$avgPos} across {$sharedKw} target " . ($sharedKw === 1 ? 'query' : 'queries');
                 } elseif ($sharedKw !== null) {
-                    $parts[] = "Strong multi-keyword SERP overlap ({$sharedKw} shared organic keywords, {$overlapPct}% overlap) in {$country}/{$language}";
+                    $parts[] = "Strong multi-keyword SERP overlap ({$sharedKw} shared organic keywords, {$overlapPct}% overlap) in {$countryLabel}";
                 }
                 if (!empty($matchedTerms)) {
                     $parts[] = 'matches core niche terms (' . implode(', ', array_slice($matchedTerms, 0, 5)) . ')';
@@ -190,10 +253,10 @@ class CompetitorDiscoveryService
                 $reason = implode('; ', $parts) . '.';
             } elseif (($sharedKw !== null && $sharedKw >= 2) || ($isSerpDiscovery && count($matchedTerms) >= 1)) {
                 $category = CompetitorDomain::CATEGORY_ORGANIC;
-                $confidence = min(78, max(54, 48 + count($matchedTerms) * 6 + ($avgPos !== null && $avgPos <= 8 ? 8 : 0)));
+                $confidence = min(78, max(54, 48 + count($matchedTerms) * 6 + ($countryVerified ? 6 : 0)));
                 $termNote = !empty($matchedTerms) ? ' matching ' . implode(', ', array_slice($matchedTerms, 0, 4)) : '';
                 $posNote = $avgPos !== null ? " at avg rank #{$avgPos}" : '';
-                $reason = "Competes organically in {$country}/{$language}{$posNote}{$termNote} with partial niche overlap.";
+                $reason = "Competes organically in {$countryLabel}{$posNote}{$termNote} with partial niche overlap.";
             } else {
                 $category = CompetitorDomain::CATEGORY_CONTENT;
                 $confidence = 48;
@@ -210,6 +273,9 @@ class CompetitorDiscoveryService
                 'avg_position' => $avgPos,
                 'matched_queries' => $matchedQueries,
                 'matched_service_terms' => array_slice($matchedTerms, 0, 6),
+                'matched_countries' => !empty($matchedCountries) ? $matchedCountries : $selectedCountries,
+                'country_verified' => $countryVerified,
+                'country_evidence' => array_slice($countryEvidence, 0, 4),
                 'organic_traffic_estimate' => $cand['organic_traffic_estimate'] ?? null,
                 'sample_title' => $sampleTitle ?: null,
                 'sample_snippet' => $sampleSnippet ?: null,
@@ -221,7 +287,7 @@ class CompetitorDiscoveryService
             ];
         }
 
-        // Prioritize Direct rivals first, then Organic Search, then Content, then Indirect/Portals — each by confidence DESC
+        // Prioritize Verified Country + Direct rivals first, then Organic, Content, Portals
         $categoryRank = [
             CompetitorDomain::CATEGORY_DIRECT => 1,
             CompetitorDomain::CATEGORY_ORGANIC => 2,
@@ -233,6 +299,10 @@ class CompetitorDiscoveryService
             if ($catCmp !== 0) {
                 return $catCmp;
             }
+            $verCmp = ((int) ($b['country_verified'] ?? false)) <=> ((int) ($a['country_verified'] ?? false));
+            if ($verCmp !== 0) {
+                return $verCmp;
+            }
             $confCmp = $b['confidence'] <=> $a['confidence'];
             if ($confCmp !== 0) {
                 return $confCmp;
@@ -240,38 +310,48 @@ class CompetitorDiscoveryService
             return ($a['avg_position'] ?? 999) <=> ($b['avg_position'] ?? 999);
         });
 
-        $methodology = (string) ($result['methodology'] ?? '');
-        if ($methodology === '') {
-            $methodology = $provider->getName() === 'first_party_crawl'
-                ? 'Built-in Public Web Search Discovery using target homepage & niche queries with portal/directory exclusion filter.'
-                : "Automated SERP & keyword overlap via {$provider->getLabel()} with portal/directory exclusion filter.";
+        $countriesDisplay = implode(', ', array_map(fn ($c) => CountryCatalog::name($c) . " ({$c})", $selectedCountries));
+        $uniqueQueriesUsed = array_values(array_unique($allQueriesUsed));
+        $filterNote = '';
+        $totalFilteredOut = $filteredForeignCount + $filteredUnverifiedCountryCount;
+        if ($strictCountryMatch && $totalFilteredOut > 0) {
+            $filterNote = " Strict country filter excluded {$totalFilteredOut} out-of-country/foreign domain(s) ({$filteredForeignCount} foreign-region, {$filteredUnverifiedCountryCount} unverified global).";
         }
+
+        $methodology = ($provider->getName() === 'first_party_crawl'
+            ? 'Built-in Public Web Search Discovery'
+            : $provider->getLabel())
+            . " analyzed " . count($uniqueQueriesUsed) . " geo-targeted queries for {$countriesDisplay} ({$language}): \""
+            . implode(' | ', array_slice($uniqueQueriesUsed, 0, 6)) . "\"." . $filterNote;
 
         return CompetitorDiscoveryRun::create([
             'organization_id' => $website->organization_id,
             'website_id' => $website->id,
             'initiated_by' => $userId,
-            'country' => $country,
+            'country' => $primaryCountry,
+            'countries' => $selectedCountries,
             'language' => $language,
             'search_engine' => $searchEngine,
-            'industry_context' => $industry,
+            'industry_context' => $detectedSummary,
             'provider' => $provider->getName(),
             'methodology' => $methodology,
             'status' => 'completed',
             'candidates' => $evaluatedCandidates,
-            'error_message' => $result['error'] ?? null,
+            'error_message' => !empty($errors) && empty($evaluatedCandidates) ? implode(' | ', $errors) : null,
             'completed_at' => now(),
         ]);
     }
 
     /**
-     * Extract target business niche, service terms, and high-signal commercial queries
+     * Extract target business niche, service terms, and crisp 3-5 word country-anchored queries
      * from user input, crawled/live homepage metadata, Brand Context Profile, and GSC queries.
      */
     public function extractTargetTopicContext(Website $website, string $targetDomain, ?string $industryContext, string $country): array
     {
         $profile = $website->contextProfile;
-        $countryName = self::COUNTRY_NAMES[$country] ?? '';
+        $countryCode = strtoupper(trim($country)) ?: 'US';
+        $countryName = CountryCatalog::name($countryCode);
+        $countryMajorCity = CountryCatalog::majorCity($countryCode);
 
         // Brand tokens that MUST NOT pollute non-branded competitor queries
         $domainStem = strtolower((string) pathinfo($targetDomain, PATHINFO_FILENAME));
@@ -280,10 +360,10 @@ class CompetitorDiscoveryService
             preg_split('/[^a-z0-9]+/i', strtolower((string) $website->name)) ?: [],
             preg_split('/[-_.]+/', $domainStem) ?: []
         ), fn ($t) => strlen($t) >= 2)));
-        // Never treat a real country name or city as a brand token to strip
+
         $geoPreserve = array_merge(
-            array_map('strtolower', array_values(self::COUNTRY_NAMES)),
-            self::KNOWN_CITIES
+            array_map('strtolower', array_values(CountryCatalog::COUNTRIES)),
+            CountryCatalog::allMajorCities()
         );
         $brandTokens = array_values(array_diff($brandTokens, $geoPreserve));
 
@@ -336,10 +416,10 @@ class CompetitorDiscoveryService
             }
         }
 
-        // 2b. If homepage is behind a WAF interstitial and no explicit industry hint was given, read Google's indexed snippet via configured SERP provider (site:domain)
+        // 2b. If homepage is behind a WAF interstitial and no explicit industry hint was given, read Google's indexed snippet via configured SERP provider
         if ($homepageTitle === '' && empty($industryContext) && $this->providerManager->hasExternalProviderFor('serp')) {
             $serpProv = $this->providerManager->resolveForCapability('serp');
-            $indexed = $serpProv->fetchSerp("site:{$targetDomain}", $country, $website->preferred_language ?: 'en');
+            $indexed = $serpProv->fetchSerp("site:{$targetDomain}", $countryCode, $website->preferred_language ?: 'en');
             if (($indexed['available'] ?? false) && !empty($indexed['organic_results'])) {
                 $firstHit = $indexed['organic_results'][0];
                 $homepageTitle = trim((string) ($firstHit['title'] ?? ''));
@@ -379,74 +459,59 @@ class CompetitorDiscoveryService
             ->values()
             ->toArray();
 
-        // 6. Detect city mentioned on homepage/profile/input
-        $combinedCorpus = strtolower(implode(' ', [$industryContext ?? '', $homepageTitle, $homepageDesc, $homepageH1, $profileBiz, $profileProducts]));
-        $detectedCity = '';
-        foreach (self::KNOWN_CITIES as $city) {
-            if (preg_match('/\b' . preg_quote($city, '/') . '\b/i', $combinedCorpus)) {
-                $detectedCity = Str::title($city);
-                break;
-            }
-        }
+        // 6. Strip ANY other country/city names from extracted service terms so multi-country searches stay pure to THIS country!
+        $allCountryLower = array_map('strtolower', array_values(CountryCatalog::COUNTRIES));
+        $allCitiesLower = CountryCatalog::allMajorCities();
+        $geoNoiseToStrip = array_merge($allCountryLower, $allCitiesLower);
 
-        // 7. Extract ordered core service terms (meaningful non-brand nouns/modifiers)
         $serviceTerms = $this->extractKeywords(
             implode(' ', [$industryContext ?? '', $cleanTitlePhrase, $cleanH1Phrase, $profileProducts, $slugPhrase, $homepageDesc]),
-            $brandTokens
+            array_merge($brandTokens, $geoNoiseToStrip)
         );
 
-        // 8. Build up to 3 high-intent commercial discovery queries
+        // 7. Build up to 3 CRISP (3-5 word) country-anchored commercial queries!
         $queries = [];
 
-        // Query A: Explicit user industry context (with country if omitted)
+        // Query A: Explicit user industry context re-anchored cleanly to THIS target country
         if ($industryContext && trim($industryContext) !== '') {
-            $q = trim($industryContext);
-            if ($countryName !== '' && !str_contains(strtolower($q), strtolower($countryName)) && strlen($q) < 60) {
-                $q .= " {$countryName}";
+            $hintClean = trim($industryContext);
+            // If user typed another country in the hint (e.g. "caregiver in bangladesh") while searching UAE, adapt cleanly for UAE!
+            $hintTerms = $this->extractKeywords($hintClean, array_merge($brandTokens, $geoNoiseToStrip));
+            if (str_contains(strtolower($hintClean), strtolower($countryName))) {
+                $queries[] = $hintClean;
+            } elseif (!empty($hintTerms)) {
+                $queries[] = trim(implode(' ', array_slice($hintTerms, 0, 4)) . " in {$countryName}");
+            } else {
+                $queries[] = trim($hintClean . " {$countryName}");
             }
-            $queries[] = $q;
         }
 
-        // Query B: Primary service phrase synthesized from homepage title / products / slugs + country
-        $primaryTokens = $this->extractKeywords(
-            trim($cleanTitlePhrase !== '' ? $cleanTitlePhrase : ($cleanH1Phrase !== '' ? $cleanH1Phrase : ($profileProducts !== '' ? $profileProducts : $slugPhrase))),
-            $brandTokens
-        );
-        $geoTokens = array_filter([$detectedCity, $countryName]);
-        $nonGeoPrimary = array_values(array_filter(
-            $primaryTokens,
-            fn ($t) => !in_array($t, array_map('strtolower', $geoTokens), true)
-        ));
+        // Query B: Crisp top 2-3 service terms + "service" + country name (and major city if applicable)
+        $top2 = array_slice($serviceTerms, 0, 2);
+        $top3 = array_slice($serviceTerms, 0, 3);
 
-        if (count($nonGeoPrimary) >= 2) {
-            $core = implode(' ', array_slice($nonGeoPrimary, 0, 5));
-            $q = trim($core . ($countryName !== '' ? " {$countryName}" : ''));
-            $queries[] = $q;
+        if (!empty($top2)) {
+            $cityPart = ($countryMajorCity !== '' && strtolower($countryMajorCity) !== strtolower($countryName))
+                ? "{$countryMajorCity} "
+                : '';
+            $queries[] = trim(implode(' ', $top2) . " service {$cityPart}{$countryName}");
         }
 
-        // Query C: Commercial service/agency angle with detected city + country
-        $coreService3 = array_slice(
-            array_values(array_filter($serviceTerms, fn ($t) => !in_array($t, array_map('strtolower', $geoTokens), true))),
-            0,
-            3
-        );
-        if (!empty($coreService3)) {
-            $locSuffix = trim(($detectedCity !== '' ? "{$detectedCity} " : '') . $countryName);
-            $q = trim(implode(' ', $coreService3) . ' service ' . $locSuffix);
-            $queries[] = $q;
+        // Query C: Crisp commercial agency/provider query anchored to country
+        if (!empty($top3)) {
+            $queries[] = trim('best ' . implode(' ', array_slice($top3, 0, 2)) . " agency {$countryName}");
         }
 
-        // Query D: Top verified non-branded GSC query (if available)
-        if (!empty($gscQueries[0])) {
-            $queries[] = trim((string) $gscQueries[0]);
+        // Query D: Top verified non-branded GSC query anchored to country if fewer than 3
+        if (count($queries) < 3 && !empty($gscQueries[0])) {
+            $gq = trim((string) $gscQueries[0]);
+            if (!str_contains(strtolower($gq), strtolower($countryName))) {
+                $gq .= " {$countryName}";
+            }
+            $queries[] = $gq;
         }
 
-        // Query E: "best <top service terms> <country>" backup commercial query if fewer than 3 queries
-        if (count($queries) < 3 && count($coreService3) >= 2) {
-            $queries[] = trim('best ' . implode(' ', array_slice($coreService3, 0, 3)) . ($countryName !== '' ? " {$countryName}" : ''));
-        }
-
-        // Deduplicate case-insensitively and limit to 3 high-signal queries
+        // Deduplicate case-insensitively and limit to 3 crisp queries
         $uniqueQueries = [];
         $seen = [];
         foreach ($queries as $q) {
@@ -459,7 +524,7 @@ class CompetitorDiscoveryService
         }
 
         if (empty($uniqueQueries)) {
-            $fallback = trim(str_replace(['-', '_', '.'], ' ', $domainStem) . ($countryName !== '' ? " {$countryName}" : ''));
+            $fallback = trim(str_replace(['-', '_', '.'], ' ', $domainStem) . " {$countryName}");
             $uniqueQueries[] = $fallback;
         }
 
@@ -499,6 +564,7 @@ class CompetitorDiscoveryService
             $tier = in_array($item['tier'] ?? '', [CompetitorDomain::TIER_PRIMARY, CompetitorDomain::TIER_SECONDARY], true)
                 ? $item['tier']
                 : CompetitorDomain::TIER_PRIMARY;
+            $candCountry = !empty($meta['matched_countries'][0]) ? strtoupper((string) $meta['matched_countries'][0]) : $run->country;
 
             $comp = CompetitorDomain::updateOrCreate(
                 [
@@ -510,7 +576,7 @@ class CompetitorDiscoveryService
                     'display_name' => $item['display_name'] ?? Str::title(str_replace('-', ' ', pathinfo($domain, PATHINFO_FILENAME))),
                     'category' => $category,
                     'tier' => $tier,
-                    'country' => $run->country,
+                    'country' => $candCountry,
                     'language' => $run->language,
                     'discovery_source' => $meta['source'] ?? $run->provider,
                     'discovery_confidence' => $meta['confidence'] ?? null,
@@ -609,7 +675,6 @@ class CompetitorDiscoveryService
             if (empty($segWords)) {
                 continue;
             }
-            // Drop short segment if it is purely the brand name (e.g., "CareMate BD")
             $nonBrand = array_diff($segWords, $brandTokens);
             if (count($segWords) <= 3 && empty($nonBrand)) {
                 continue;
@@ -620,20 +685,29 @@ class CompetitorDiscoveryService
         return implode(' ', $kept);
     }
 
-    private function extractKeywords(string $text, array $brandTokens): array
+    /**
+     * Extract meaningful keywords while deduplicating singular/plural stems (e.g. caregiver + caregivers -> caregiver).
+     */
+    private function extractKeywords(string $text, array $excludeTokens): array
     {
         $words = preg_split('/[^a-z0-9]+/i', strtolower($text)) ?: [];
         $out = [];
-        $seen = [];
+        $seenStems = [];
+        $excludeSet = array_flip($excludeTokens);
+
         foreach ($words as $w) {
             if (strlen($w) < 3 || is_numeric($w)) {
                 continue;
             }
-            if (in_array($w, self::STOP_WORDS, true) || in_array($w, $brandTokens, true)) {
+            if (in_array($w, self::STOP_WORDS, true) || isset($excludeSet[$w])) {
                 continue;
             }
-            if (!isset($seen[$w])) {
-                $seen[$w] = true;
+            $stem = strlen($w) > 4 ? rtrim($w, 's') : $w;
+            if (isset($excludeSet[$stem])) {
+                continue;
+            }
+            if (!isset($seenStems[$stem])) {
+                $seenStems[$stem] = true;
                 $out[] = $w;
             }
         }
@@ -649,7 +723,7 @@ class CompetitorDiscoveryService
         $haystack = strtolower($domain . ' ' . ($title ?? '') . ' ' . ($snippet ?? ''));
         $matched = [];
         foreach ($serviceTerms as $term) {
-            $stem = strlen($term) > 5 ? rtrim($term, 's') : $term;
+            $stem = strlen($term) > 4 ? rtrim($term, 's') : $term;
             if (str_contains($haystack, $term) || ($stem !== $term && str_contains($haystack, $stem))) {
                 $matched[] = $term;
             }

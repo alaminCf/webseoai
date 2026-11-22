@@ -657,4 +657,106 @@ class CompetitorAnalysisTest extends TestCase
         $this->assertEquals('direct', $candidates->firstWhere('domain', 'claracareservices.com')['category']);
         $this->assertStringContainsString('caregivers', strtolower((string) $res->json('data.methodology')));
     }
+
+    public function test_strict_country_filter_excludes_foreign_us_sites_for_bd_and_supports_multi_country(): void
+    {
+        config([
+            'competitors.providers.dataforseo.login' => '',
+            'competitors.providers.dataforseo.password' => '',
+            'competitors.providers.semrush.api_key' => '',
+            'competitors.providers.ahrefs.api_key' => '',
+            'competitors.providers.serpapi.api_key' => '',
+            'competitors.providers.serper.api_key' => 'test_serper_key',
+        ]);
+
+        Http::fake([
+            'https://carematebd.com*' => Http::response(
+                '<html><head><title>CareMate BD — Caregivers &amp; Nursing Care</title></head><body></body></html>',
+                200
+            ),
+            'https://google.serper.dev/search' => function ($request) {
+                $gl = (string) ($request->data()['gl'] ?? '');
+                if ($gl === 'ae') {
+                    return Http::response([
+                        'organic' => [
+                            [
+                                'position' => 1,
+                                'link' => 'https://dubaicaregivers.ae/services',
+                                'title' => 'Dubai Caregivers UAE | Elderly Home Nursing in Dubai',
+                                'snippet' => 'Licensed home nursing and caregivers in Dubai and Abu Dhabi, UAE.',
+                            ],
+                        ],
+                    ], 200);
+                }
+
+                // Simulate foreign US pollution (care.com Marco Island FL + hopkinsmedicine.org) mixed with real BD rivals!
+                return Http::response([
+                    'organic' => [
+                        [
+                            'position' => 1,
+                            'link' => 'https://www.care.com/caregivers/marco-island-fl',
+                            'title' => 'TOP 10 Private Caregivers in Marco Island, FL - Affordable',
+                            'snippet' => 'Find 60 affordable caregivers in Marco Island, FL, starting at $31.67/hr.',
+                        ],
+                        [
+                            'position' => 2,
+                            'link' => 'https://www.hopkinsmedicine.org/health/caregiving',
+                            'title' => 'Johns Hopkins Medicine Caregiving Guide',
+                            'snippet' => 'Resources for family caregivers from Johns Hopkins in Baltimore, MD.',
+                        ],
+                        [
+                            'position' => 3,
+                            'link' => 'https://caregiveragencybd.com/services',
+                            'title' => 'Caregiver Agency BD | Elderly & Nursing Care in Bangladesh',
+                            'snippet' => 'Trusted home nursing and caregiver service in Dhaka, Bangladesh.',
+                        ],
+                        [
+                            'position' => 4,
+                            'link' => 'https://maishacare.com/nursing-dhaka',
+                            'title' => 'Maisha Care | Home Nursing Service in Dhaka BD',
+                            'snippet' => '24/7 trained caregivers and elderly home care in Dhaka, Bangladesh.',
+                        ],
+                    ],
+                ], 200);
+            },
+        ]);
+
+        // 1. Single-country strict BD search MUST exclude care.com (FL) & hopkinsmedicine.org (US) and keep ONLY BD rivals!
+        $bdRes = $this->actingAs($this->seoManager)
+            ->withHeaders($this->authHeaders($this->seoManager, $this->org))
+            ->postJson("/api/v1/websites/{$this->website->id}/competitors/discover", [
+                'countries' => ['BD'],
+                'language' => 'en',
+                'industry_context' => 'caregiver in bangladesh',
+                'strict_country_match' => true,
+                'force_refresh' => true,
+            ]);
+
+        $bdRes->assertStatus(201);
+        $bdCandidates = collect($bdRes->json('data.candidates'));
+        $this->assertNull($bdCandidates->firstWhere('domain', 'care.com'));
+        $this->assertNull($bdCandidates->firstWhere('domain', 'hopkinsmedicine.org'));
+        $this->assertNotNull($bdCandidates->firstWhere('domain', 'caregiveragencybd.com'));
+        $this->assertNotNull($bdCandidates->firstWhere('domain', 'maishacare.com'));
+        $this->assertTrue($bdCandidates->firstWhere('domain', 'caregiveragencybd.com')['country_verified']);
+        $this->assertEquals(['BD'], $bdCandidates->firstWhere('domain', 'caregiveragencybd.com')['matched_countries']);
+
+        // 2. Multi-country search (BD + AE) returns BOTH verified BD and AE rivals while STILL rejecting US Florida care.com!
+        $multiRes = $this->actingAs($this->seoManager)
+            ->withHeaders($this->authHeaders($this->seoManager, $this->org))
+            ->postJson("/api/v1/websites/{$this->website->id}/competitors/discover", [
+                'countries' => ['BD', 'AE'],
+                'language' => 'en',
+                'industry_context' => 'elderly caregiver service',
+                'strict_country_match' => true,
+                'force_refresh' => true,
+            ]);
+
+        $multiRes->assertStatus(201);
+        $this->assertEquals(['BD', 'AE'], $multiRes->json('data.countries'));
+        $multiCandidates = collect($multiRes->json('data.candidates'));
+        $this->assertNull($multiCandidates->firstWhere('domain', 'care.com'));
+        $this->assertEquals(['BD'], $multiCandidates->firstWhere('domain', 'caregiveragencybd.com')['matched_countries']);
+        $this->assertEquals(['AE'], $multiCandidates->firstWhere('domain', 'dubaicaregivers.ae')['matched_countries']);
+    }
 }

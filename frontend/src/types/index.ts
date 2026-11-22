@@ -928,6 +928,9 @@ export interface CompetitorDiscoveryCandidate {
   avg_position?: number | null;
   matched_queries?: string[];
   matched_service_terms?: string[];
+  matched_countries?: string[];
+  country_verified?: boolean;
+  country_evidence?: string[];
   organic_traffic_estimate?: number | null;
   sample_title?: string | null;
   sample_snippet?: string | null;
@@ -941,6 +944,7 @@ export interface CompetitorDiscoveryCandidate {
 export interface CompetitorDiscoveryRun {
   id: number;
   country: string;
+  countries?: string[] | null;
   language: string;
   search_engine: string;
   industry_context: string | null;

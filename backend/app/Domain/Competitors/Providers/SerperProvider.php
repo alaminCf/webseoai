@@ -3,6 +3,7 @@
 namespace App\Domain\Competitors\Providers;
 
 use App\Domain\Competitors\Contracts\CompetitorProviderInterface;
+use App\Domain\Competitors\Support\CountryCatalog;
 use Illuminate\Support\Facades\Http;
 use Throwable;
 
@@ -165,15 +166,16 @@ class SerperProvider implements CompetitorProviderInterface
         }
 
         try {
-            $gl = (string) (config('competitors.country_map.' . strtoupper($country) . '.gl') ?? strtolower($country));
+            $gl = CountryCatalog::gl($country);
+            $geoLocation = $location ?: CountryCatalog::serperLocation($country);
             $payload = [
                 'q' => $keyword,
                 'gl' => $gl,
                 'hl' => strtolower($language),
                 'num' => 20,
             ];
-            if ($location) {
-                $payload['location'] = $location;
+            if ($geoLocation !== '') {
+                $payload['location'] = $geoLocation;
             }
 
             $res = Http::withHeaders([

@@ -258,20 +258,28 @@ class CompetitorAnalysisController extends Controller
 
         $validated = $request->validate([
             'country' => ['nullable', 'string', 'max:10'],
+            'countries' => ['nullable', 'array', 'max:5'],
+            'countries.*' => ['string', 'size:2'],
             'language' => ['nullable', 'string', 'max:10'],
             'search_engine' => ['nullable', 'string', Rule::in(['google', 'bing'])],
             'industry_context' => ['nullable', 'string', 'max:255'],
+            'strict_country_match' => ['nullable', 'boolean'],
             'force_refresh' => ['nullable', 'boolean'],
         ]);
+
+        $primaryCountry = $validated['country'] ?? ($website->target_country ?: 'US');
+        $countries = !empty($validated['countries']) ? $validated['countries'] : [$primaryCountry];
 
         $run = $this->discoveryService->discover(
             $website,
             $request->user()->id,
-            $validated['country'] ?? ($website->target_country ?: 'US'),
+            $primaryCountry,
             $validated['language'] ?? ($website->preferred_language ?: 'en'),
             $validated['search_engine'] ?? 'google',
             $validated['industry_context'] ?? null,
-            (bool) ($validated['force_refresh'] ?? false)
+            (bool) ($validated['force_refresh'] ?? false),
+            $countries,
+            array_key_exists('strict_country_match', $validated) ? (bool) $validated['strict_country_match'] : true
         );
 
         return $this->success($run, null, 201);

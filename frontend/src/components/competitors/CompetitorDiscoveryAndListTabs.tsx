@@ -28,7 +28,9 @@ import {
   CompetitorProviderStatus,
 } from '@/types';
 import { api } from '@/lib/api';
+import { countryFlag, getCountryName } from '@/lib/countries';
 import { useToast } from '@/context/ToastContext';
+import { CountryMultiSelect } from './CountryMultiSelect';
 
 interface OverviewTabProps {
   website: Website;
@@ -296,6 +298,8 @@ export function CompetitorOverviewTab({
 interface MyCompetitorsTabProps {
   website: Website;
   country: string;
+  countries: string[];
+  onCountriesChange?: (countries: string[]) => void;
   language: string;
   competitors: CompetitorDomainItem[];
   onRefresh: () => void;
@@ -304,6 +308,8 @@ interface MyCompetitorsTabProps {
 export function MyCompetitorsTab({
   website,
   country,
+  countries,
+  onCountriesChange,
   language,
   competitors,
   onRefresh,
@@ -316,6 +322,7 @@ export function MyCompetitorsTab({
 
   // Discovery state
   const [industryHint, setIndustryHint] = useState('');
+  const [strictCountryMatch, setStrictCountryMatch] = useState(true);
   const [isDiscovering, setIsDiscovering] = useState(false);
   const [discoveryRun, setDiscoveryRun] = useState<CompetitorDiscoveryRun | null>(null);
   const [selectedDomains, setSelectedDomains] = useState<Record<string, boolean>>({});
@@ -324,6 +331,7 @@ export function MyCompetitorsTab({
   >({});
   const [hidePortals, setHidePortals] = useState(true);
   const [isConfirming, setIsConfirming] = useState(false);
+  const activeCountries = countries.length > 0 ? countries : [country || 'US'];
 
   const hydrateDiscoveryRun = (run: CompetitorDiscoveryRun) => {
     setDiscoveryRun(run);
@@ -387,10 +395,12 @@ export function MyCompetitorsTab({
     setIsDiscovering(true);
     try {
       const res = await api.post<CompetitorDiscoveryRun>(`/websites/${website.id}/competitors/discover`, {
-        country,
+        country: activeCountries[0],
+        countries: activeCountries,
         language,
         search_engine: 'google',
         industry_context: industryHint.trim() || undefined,
+        strict_country_match: strictCountryMatch,
         force_refresh: forceRefresh,
       });
       if (res.success && res.data) {
@@ -555,15 +565,43 @@ export function MyCompetitorsTab({
 
           <div className="space-y-3 text-xs">
             <div>
+              <label className="block text-zinc-400 mb-1 font-medium">Target Countries (Single or Multi-Country, All 195 Countries)</label>
+              {onCountriesChange ? (
+                <CountryMultiSelect
+                  selected={activeCountries}
+                  onChange={onCountriesChange}
+                  maxSelection={5}
+                  className="w-full"
+                />
+              ) : (
+                <div className="text-zinc-300 font-mono">
+                  {activeCountries.map((c) => `${countryFlag(c)} ${c}`).join(', ')}
+                </div>
+              )}
+            </div>
+
+            <div>
               <label className="block text-zinc-400 mb-1 font-medium">Industry / Niche Context (Optional)</label>
               <input
                 type="text"
                 value={industryHint}
                 onChange={(e) => setIndustryHint(e.target.value)}
-                placeholder="e.g. Home healthcare services in Bangladesh"
+                placeholder="e.g. Home nursing & caregiver service"
                 className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-xl text-zinc-100 focus:outline-none focus:border-sky-500"
               />
             </div>
+
+            <label className="flex items-center gap-2 text-[11px] text-zinc-300 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={strictCountryMatch}
+                onChange={(e) => setStrictCountryMatch(e.target.checked)}
+                className="accent-emerald-500 rounded"
+              />
+              <span>
+                <strong>Exact Country Match Only</strong> — automatically exclude foreign-country domains (e.g. US/UK/IN sites when searching {activeCountries.map((c) => getCountryName(c)).join(', ')})
+              </span>
+            </label>
 
             <div className="flex gap-2">
               <button
@@ -573,7 +611,11 @@ export function MyCompetitorsTab({
                 className="flex-1 py-2.5 px-4 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-semibold rounded-xl transition flex items-center justify-center gap-2"
               >
                 <Sparkles className={`w-4 h-4 ${isDiscovering ? 'animate-spin' : ''}`} />
-                <span>{isDiscovering ? 'Scanning Live Search...' : `Discover Competitors (${country} / ${language})`}</span>
+                <span>
+                  {isDiscovering
+                    ? 'Scanning Live Search...'
+                    : `Discover Competitors (${activeCountries.map((c) => `${countryFlag(c)} ${c}`).join(' + ')} / ${language})`}
+                </span>
               </button>
               {discoveryRun && (
                 <button
@@ -742,6 +784,18 @@ export function MyCompetitorsTab({
                               <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-950 border border-zinc-800 text-emerald-400">
                                 Confidence {cand.confidence}%
                               </span>
+                              {(cand.matched_countries && cand.matched_countries.length > 0) && (
+                                <span
+                                  className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
+                                    cand.country_verified
+                                      ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                                      : 'bg-zinc-900 text-zinc-400 border-zinc-700'
+                                  }`}
+                                >
+                                  {cand.matched_countries.map((cc) => `${countryFlag(cc)} ${cc}`).join(', ')}
+                                  {cand.country_verified ? ' Verified' : ''}
+                                </span>
+                              )}
                               {cand.avg_position != null && (
                                 <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-950 border border-zinc-800 text-sky-300">
                                   Avg Rank #{cand.avg_position}
