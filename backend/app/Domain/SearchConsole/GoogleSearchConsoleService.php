@@ -153,7 +153,7 @@ class GoogleSearchConsoleService
         $properties = $this->fetchPropertiesFromGoogle($accessToken);
         $selectedProperty = $this->determineBestMatchingProperty($website, $properties);
 
-        return WebsiteIntegration::updateOrCreate(
+        $integration = WebsiteIntegration::updateOrCreate(
             [
                 'website_id' => $website->id,
                 'provider' => WebsiteIntegration::PROVIDER_GSC,
@@ -173,6 +173,68 @@ class GoogleSearchConsoleService
                 ],
             ]
         );
+
+        // Auto-verify website ownership when Google confirms a matching verified property
+        if (!$website->isVerified() && $this->findMatchingVerifiedProperty($website, $properties) !== null) {
+            $website->update([
+                'verification_status' => Website::VERIFICATION_VERIFIED,
+                'verification_method' => 'google_search_console',
+                'verified_at' => now(),
+            ]);
+        }
+
+        return $integration;
+    }
+
+    /**
+     * Check if a connected GSC integration proves ownership of this website domain.
+     * Returns the matched siteUrl or null if not verified in GSC.
+     */
+    public function findVerifiedPropertyForWebsite(Website $website): ?string
+    {
+        $integration = $website->gscIntegration;
+        if (!$integration || $integration->status !== WebsiteIntegration::STATUS_CONNECTED) {
+            return null;
+        }
+
+        $properties = $integration->metadata['properties'] ?? [];
+
+        // If connected live and cached properties are empty, refresh directly from Google
+        if (empty($properties) && empty($integration->metadata['is_sandbox'])) {
+            try {
+                $accessToken = $this->getValidAccessToken($integration);
+                $properties = $this->fetchPropertiesFromGoogle($accessToken);
+                if (!empty($properties)) {
+                    $metadata = $integration->metadata ?? [];
+                    $metadata['properties'] = $properties;
+                    $integration->update(['metadata' => $metadata]);
+                }
+            } catch (Throwable $e) {
+                Log::warning('Failed refreshing GSC properties during ownership verification', [
+                    'website_id' => $website->id,
+                    'error' => $e->getMessage(),
+                ]);
+            }
+        }
+
+        return $this->findMatchingVerifiedProperty($website, $properties);
+    }
+
+    /**
+     * Match a website's domain against Google Search Console properties with owner/full permissions.
+     */
+    private function findMatchingVerifiedProperty(Website $website, array $properties): ?string
+    {
+        $allowedLevels = ['siteOwner', 'siteFullUser'];
+        foreach ($properties as $prop) {
+            $siteUrl = (string) ($prop['siteUrl'] ?? '');
+            $level = (string) ($prop['permissionLevel'] ?? '');
+            if ($siteUrl !== '' && in_array($level, $allowedLevels, true) && $website->matchesGscProperty($siteUrl)) {
+                return $siteUrl;
+            }
+        }
+
+        return null;
     }
 
     /**

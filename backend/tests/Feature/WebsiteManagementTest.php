@@ -201,4 +201,121 @@ class WebsiteManagementTest extends TestCase
         $decrypted = $integration->getDecryptedCredentials();
         $this->assertEquals('abcd 1234 efgh 5678', $decrypted['application_password']);
     }
+
+    public function test_easy_verification_methods_gsc_file_cms_and_seo_manager_instant_verify(): void
+    {
+        // 1. Listing websites includes non-empty verification token & snippets (fixes undefined token UI bug)
+        $site = Website::create([
+            'organization_id' => $this->organization->id,
+            'name' => 'CareMate BD',
+            'domain' => 'carematebd.com',
+            'target_url' => 'https://carematebd.com',
+            'platform' => Website::PLATFORM_WORDPRESS,
+            'verification_status' => Website::VERIFICATION_UNVERIFIED,
+        ]);
+
+        $listRes = $this->actingAs($this->adminUser)
+            ->withHeader('X-Organization-Id', (string) $this->organization->id)
+            ->getJson('/api/v1/websites');
+
+        $listRes->assertOk();
+        $listed = collect($listRes->json('data'))->firstWhere('id', $site->id);
+        $this->assertNotEmpty($listed['verification']['token'] ?? null);
+        $this->assertStringContainsString($listed['verification']['token'], $listed['verification']['meta_tag']);
+
+        // 2. HTML/TXT file upload verification works
+        $fileSnippet = $listed['verification']['file_token'];
+        \Illuminate\Support\Facades\Http::fake([
+            'https://carematebd.com/' . $fileSnippet['filename'] => \Illuminate\Support\Facades\Http::response($fileSnippet['content'], 200),
+            'https://handymansuperservices.com/wp-json/wp/v2/users/me' => \Illuminate\Support\Facades\Http::response(['id' => 1, 'name' => 'Admin'], 200),
+        ]);
+
+        $fileVerifyRes = $this->actingAs($this->adminUser)
+            ->withHeader('X-Organization-Id', (string) $this->organization->id)
+            ->postJson("/api/v1/websites/{$site->id}/verify", ['method' => 'file_token']);
+
+        $fileVerifyRes->assertOk()->assertJsonPath('data.verified', true);
+        $this->assertTrue($site->fresh()->isVerified());
+
+        // 3. 1-Click Google Search Console verification works when matching property is connected
+        $gscSite = Website::create([
+            'organization_id' => $this->organization->id,
+            'name' => 'GSC Verified Site',
+            'domain' => 'gscverified.com',
+            'target_url' => 'https://gscverified.com',
+            'platform' => Website::PLATFORM_CUSTOM,
+            'verification_status' => Website::VERIFICATION_UNVERIFIED,
+        ]);
+
+        WebsiteIntegration::create([
+            'organization_id' => $this->organization->id,
+            'website_id' => $gscSite->id,
+            'provider' => WebsiteIntegration::PROVIDER_GSC,
+            'encrypted_credentials' => ['access_token' => 'live_tok', 'is_sandbox' => false],
+            'status' => WebsiteIntegration::STATUS_CONNECTED,
+            'metadata' => [
+                'is_sandbox' => false,
+                'selected_property' => 'sc-domain:gscverified.com',
+                'properties' => [
+                    ['siteUrl' => 'sc-domain:gscverified.com', 'permissionLevel' => 'siteOwner'],
+                ],
+            ],
+        ]);
+
+        $gscVerifyRes = $this->actingAs($this->adminUser)
+            ->withHeader('X-Organization-Id', (string) $this->organization->id)
+            ->postJson("/api/v1/websites/{$gscSite->id}/verify", ['method' => 'google_search_console']);
+
+        $gscVerifyRes->assertOk()->assertJsonPath('data.verified', true);
+        $this->assertEquals('google_search_console', $gscSite->fresh()->verification_method);
+
+        // 4. One-Step WordPress REST verify + connect unlocks & saves encrypted credentials in one shot
+        $wpSite = Website::create([
+            'organization_id' => $this->organization->id,
+            'name' => 'Handyman WP',
+            'domain' => 'handymansuperservices.com',
+            'target_url' => 'https://handymansuperservices.com',
+            'platform' => Website::PLATFORM_WORDPRESS,
+            'verification_status' => Website::VERIFICATION_UNVERIFIED,
+        ]);
+
+        $wpVerifyRes = $this->actingAs($this->adminUser)
+            ->withHeader('X-Organization-Id', (string) $this->organization->id)
+            ->postJson("/api/v1/websites/{$wpSite->id}/verify", [
+                'method' => 'cms_credentials',
+                'provider' => 'wordpress_rest',
+                'credentials' => [
+                    'username' => 'wp_admin',
+                    'application_password' => '1111 2222 3333 4444',
+                ],
+            ]);
+
+        $wpVerifyRes->assertOk()->assertJsonPath('data.verified', true);
+        $this->assertTrue($wpSite->fresh()->isVerified());
+        $this->assertEquals(Website::STATUS_CONNECTED, $wpSite->fresh()->connection_status);
+
+        // 5. SEO Manager role can use Instant Agency Verify (manual_override)
+        $seoManager = User::factory()->create();
+        OrganizationMember::create([
+            'organization_id' => $this->organization->id,
+            'user_id' => $seoManager->id,
+            'role' => OrganizationMember::ROLE_SEO_MANAGER,
+        ]);
+
+        $agencySite = Website::create([
+            'organization_id' => $this->organization->id,
+            'name' => 'Agency Client Site',
+            'domain' => 'agencyclient.com',
+            'target_url' => 'https://agencyclient.com',
+            'platform' => Website::PLATFORM_CUSTOM,
+            'verification_status' => Website::VERIFICATION_UNVERIFIED,
+        ]);
+
+        $overrideRes = $this->actingAs($seoManager)
+            ->withHeader('X-Organization-Id', (string) $this->organization->id)
+            ->postJson("/api/v1/websites/{$agencySite->id}/verify", ['method' => 'manual_override']);
+
+        $overrideRes->assertOk()->assertJsonPath('data.verified', true);
+        $this->assertTrue($agencySite->fresh()->isVerified());
+    }
 }

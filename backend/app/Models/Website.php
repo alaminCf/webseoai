@@ -170,6 +170,48 @@ class Website extends Model
     }
 
     /**
+     * Guarantee a persistent verification token exists on the website record.
+     */
+    public function ensureVerificationToken(): string
+    {
+        if (empty($this->verification_token)) {
+            $this->verification_token = 'web-seo-ai-' . Str::random(32);
+            $this->save();
+        }
+
+        return $this->verification_token;
+    }
+
+    /**
+     * Check whether a Google Search Console siteUrl corresponds to this website's domain.
+     */
+    public function matchesGscProperty(string $siteUrl): bool
+    {
+        $siteUrl = strtolower(trim($siteUrl));
+        if ($siteUrl === '') {
+            return false;
+        }
+
+        $targetDomain = preg_replace('/^www\./i', '', strtolower(trim($this->domain)));
+        if ($targetDomain === '') {
+            return false;
+        }
+
+        if (str_starts_with($siteUrl, 'sc-domain:')) {
+            $propDomain = preg_replace('/^www\./i', '', substr($siteUrl, strlen('sc-domain:')));
+            return $propDomain === $targetDomain;
+        }
+
+        $host = parse_url($siteUrl, PHP_URL_HOST);
+        if (!$host) {
+            return false;
+        }
+
+        $propDomain = preg_replace('/^www\./i', '', strtolower($host));
+        return $propDomain === $targetDomain;
+    }
+
+    /**
      * Ownership verification verification snippet helpers
      */
     public function getMetaTagSnippetAttribute(): string
