@@ -20,6 +20,7 @@ import { api } from '@/lib/api';
 import { Website } from '@/types';
 import { AuthView } from '@/components/AuthView';
 import { Sidebar } from '@/components/Sidebar';
+import { ThemeToggle } from '@/components/ThemeToggle';
 import { OverviewView } from '@/components/OverviewView';
 import { WebsiteListView } from '@/components/WebsiteListView';
 import { SeoActionPlanView } from '@/components/SeoActionPlanView';
@@ -215,7 +216,8 @@ export default function DashboardPage() {
           </div>
 
           {/* Quick Actions & Website Selector */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5 sm:gap-3">
+            <ThemeToggle variant="compact" />
             {websites.length > 0 && (
               <div className="hidden sm:flex items-center gap-2 bg-zinc-900/80 border border-zinc-800 rounded-xl px-2.5 py-1.5 text-xs">
                 <Globe className="w-3.5 h-3.5 text-zinc-500" />

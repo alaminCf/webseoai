@@ -19,6 +19,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
+import { ThemeToggle } from './ThemeToggle';
 
 interface SidebarProps {
   activeTab: string;
@@ -185,8 +186,9 @@ export function Sidebar({
           })}
         </nav>
 
-        {/* User Footer & Logout */}
-        <div className="p-4 border-t border-zinc-800/80">
+        {/* Theme Switcher & User Footer */}
+        <div className="p-4 border-t border-zinc-800/80 space-y-3">
+          <ThemeToggle variant="segmented" />
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5 truncate">
               <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-semibold text-zinc-200 shrink-0">

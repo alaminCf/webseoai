@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import Link from 'next/link';
 import { Sparkles, Lock, Mail, ArrowRight, ShieldCheck, User } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
+import { ThemeToggle } from '@/components/ThemeToggle';
 
 export function AuthView() {
   const [isRegister, setIsRegister] = useState(false);
@@ -35,7 +36,10 @@ export function AuthView() {
   };
 
   return (
-    <div className="min-h-screen bg-black text-zinc-100 flex flex-col justify-center items-center p-4 sm:p-6">
+    <div className="min-h-screen bg-black text-zinc-100 flex flex-col justify-center items-center p-4 sm:p-6 relative">
+      <div className="fixed top-4 right-4 z-20">
+        <ThemeToggle variant="compact" />
+      </div>
       <div className="w-full max-w-md">
         {/* Brand Banner */}
         <div className="text-center mb-8">
