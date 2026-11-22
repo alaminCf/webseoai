@@ -38,7 +38,13 @@ class CmsAdapterManager
         }
 
         if ($platform === Website::PLATFORM_CUSTOM) {
-            return new GenericCustomAdapter($website);
+            $integration = WebsiteIntegration::where('website_id', $website->id)
+                ->where('provider', WebsiteIntegration::PROVIDER_CUSTOM_WEBHOOK)
+                ->where('status', WebsiteIntegration::STATUS_CONNECTED)
+                ->first();
+
+            $credentials = $integration ? ($integration->getDecryptedCredentials() ?? []) : [];
+            return new GenericCustomAdapter($website, $credentials);
         }
 
         throw new InvalidArgumentException("Unsupported platform [{$platform}].");

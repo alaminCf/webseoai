@@ -66,7 +66,7 @@ export interface Website {
 export interface WebsiteIntegration {
   id: number;
   website_id: number;
-  provider: 'wordpress_rest' | 'shopify_graphql' | 'gsc_oauth';
+  provider: 'wordpress_rest' | 'shopify_graphql' | 'custom_webhook' | 'gsc_oauth';
   status: ConnectionStatus;
   last_error?: string | null;
   last_synced_at?: string | null;

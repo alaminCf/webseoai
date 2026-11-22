@@ -317,5 +317,34 @@ class WebsiteManagementTest extends TestCase
 
         $overrideRes->assertOk()->assertJsonPath('data.verified', true);
         $this->assertTrue($agencySite->fresh()->isVerified());
+
+        // 6. Custom Website REST API / Webhook integration saves encrypted credentials and passes live ping test
+        \Illuminate\Support\Facades\Http::fake([
+            'https://agencyclient.com/api/seo-webhook' => \Illuminate\Support\Facades\Http::response(['ok' => true], 200),
+        ]);
+
+        $customSaveRes = $this->actingAs($seoManager)
+            ->withHeader('X-Organization-Id', (string) $this->organization->id)
+            ->postJson("/api/v1/websites/{$agencySite->id}/integrations", [
+                'provider' => 'custom_webhook',
+                'credentials' => [
+                    'endpoint_url' => 'https://agencyclient.com/api/seo-webhook',
+                    'api_key' => 'sk_live_custom_secret_123',
+                    'auth_header' => 'Authorization',
+                    'webhook_secret' => 'whsec_test_456',
+                ],
+            ]);
+
+        $customSaveRes->assertStatus(201)
+            ->assertJsonPath('data.provider', 'custom_webhook')
+            ->assertJsonPath('data.metadata.endpoint_url', 'https://agencyclient.com/api/seo-webhook');
+
+        $customTestRes = $this->actingAs($seoManager)
+            ->withHeader('X-Organization-Id', (string) $this->organization->id)
+            ->postJson("/api/v1/websites/{$agencySite->id}/integrations/custom_webhook/test");
+
+        $customTestRes->assertOk()
+            ->assertJsonPath('data.connected', true)
+            ->assertJsonPath('data.status', 'connected');
     }
 }

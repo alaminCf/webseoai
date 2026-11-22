@@ -23,6 +23,41 @@ class GenericCustomAdapter implements CmsAdapterInterface
     {
         $this->website = $website;
         $this->credentials = $credentials;
+
+        if ($this->hasConfiguredWebhook()) {
+            $this->capabilities = [
+                'read_pages',
+                'snapshots',
+                'update_metadata',
+                'update_content',
+                'verify_changes',
+            ];
+        }
+    }
+
+    private function hasConfiguredWebhook(): bool
+    {
+        return !empty($this->credentials['endpoint_url']) && !empty($this->credentials['api_key']);
+    }
+
+    private function buildWebhookHeaders(array $payload): array
+    {
+        $apiKey = (string) ($this->credentials['api_key'] ?? '');
+        $authHeader = trim((string) ($this->credentials['auth_header'] ?? 'Authorization')) ?: 'Authorization';
+        $headers = [
+            'Accept' => 'application/json',
+            'User-Agent' => 'WebSEOAI-Webhook/1.0',
+            $authHeader => strcasecmp($authHeader, 'Authorization') === 0
+                ? (str_starts_with($apiKey, 'Bearer ') ? $apiKey : "Bearer {$apiKey}")
+                : $apiKey,
+        ];
+
+        $secret = (string) ($this->credentials['webhook_secret'] ?? '');
+        if ($secret !== '') {
+            $headers['X-WebSEOAI-Signature'] = hash_hmac('sha256', json_encode($payload), $secret);
+        }
+
+        return $headers;
     }
 
     public function getProviderName(): string
@@ -80,22 +115,72 @@ class GenericCustomAdapter implements CmsAdapterInterface
 
     public function updateSupportedMetadata(string $identifier, array $metadata): array
     {
-        // Enforce Phase 5 safety requirement: Never execute arbitrary code or unauthorized writes on custom sites
-        throw new UnsupportedCapabilityException(
-            $this->getProviderName(),
-            'update_metadata',
-            'Generic custom websites are read-only. Remote write execution is strictly disabled unless an authenticated webhook API adapter is explicitly configured and verified.'
-        );
+        if (!$this->hasConfiguredWebhook()) {
+            // Enforce Phase 5 safety requirement: Never execute arbitrary code or unauthorized writes on custom sites
+            throw new UnsupportedCapabilityException(
+                $this->getProviderName(),
+                'update_metadata',
+                'Generic custom websites are read-only. Remote write execution is strictly disabled unless an authenticated webhook API adapter is explicitly configured and verified.'
+            );
+        }
+
+        $payload = [
+            'event' => 'update_metadata',
+            'domain' => $this->website->domain,
+            'target_identifier' => $identifier,
+            'metadata' => $metadata,
+            'timestamp' => now()->toIso8601String(),
+        ];
+
+        $res = Http::withHeaders($this->buildWebhookHeaders($payload))
+            ->timeout(15)
+            ->post($this->credentials['endpoint_url'], $payload);
+
+        if (!$res->successful()) {
+            throw new Exception('Custom webhook rejected metadata update (HTTP ' . $res->status() . ').');
+        }
+
+        return [
+            'updated' => true,
+            'target_identifier' => $identifier,
+            'applied' => $metadata,
+            'remote_response' => $res->json() ?? ['status' => $res->status()],
+        ];
     }
 
     public function updateContent(string $identifier, array $content): array
     {
-        // Enforce Phase 5 safety requirement: Never execute arbitrary code or unauthorized writes on custom sites
-        throw new UnsupportedCapabilityException(
-            $this->getProviderName(),
-            'update_content',
-            'Generic custom websites are read-only. Direct remote code execution or file alteration is forbidden.'
-        );
+        if (!$this->hasConfiguredWebhook()) {
+            // Enforce Phase 5 safety requirement: Never execute arbitrary code or unauthorized writes on custom sites
+            throw new UnsupportedCapabilityException(
+                $this->getProviderName(),
+                'update_content',
+                'Generic custom websites are read-only. Direct remote code execution or file alteration is forbidden.'
+            );
+        }
+
+        $payload = [
+            'event' => 'update_content',
+            'domain' => $this->website->domain,
+            'target_identifier' => $identifier,
+            'content' => $content,
+            'timestamp' => now()->toIso8601String(),
+        ];
+
+        $res = Http::withHeaders($this->buildWebhookHeaders($payload))
+            ->timeout(15)
+            ->post($this->credentials['endpoint_url'], $payload);
+
+        if (!$res->successful()) {
+            throw new Exception('Custom webhook rejected content update (HTTP ' . $res->status() . ').');
+        }
+
+        return [
+            'updated' => true,
+            'target_identifier' => $identifier,
+            'applied' => $content,
+            'remote_response' => $res->json() ?? ['status' => $res->status()],
+        ];
     }
 
     public function createBackupOrSnapshot(string $identifier): array

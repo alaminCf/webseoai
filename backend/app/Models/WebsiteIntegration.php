@@ -14,11 +14,13 @@ class WebsiteIntegration extends Model
 
     public const PROVIDER_WORDPRESS = 'wordpress_rest';
     public const PROVIDER_SHOPIFY = 'shopify_graphql';
+    public const PROVIDER_CUSTOM_WEBHOOK = 'custom_webhook';
     public const PROVIDER_GSC = 'gsc_oauth';
 
     public const PROVIDERS = [
         self::PROVIDER_WORDPRESS,
         self::PROVIDER_SHOPIFY,
+        self::PROVIDER_CUSTOM_WEBHOOK,
         self::PROVIDER_GSC,
     ];
 
