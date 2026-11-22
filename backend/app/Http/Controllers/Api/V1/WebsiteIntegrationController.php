@@ -90,19 +90,43 @@ class WebsiteIntegrationController extends Controller
                 return $this->error('Shopify integration requires shop_domain and access_token.', 'INVALID_CREDENTIALS', null, 422);
             }
         } elseif ($provider === WebsiteIntegration::PROVIDER_CUSTOM_WEBHOOK) {
-            $endpointUrl = trim((string) ($rawCredentials['endpoint_url'] ?? ''));
+            $username = trim((string) ($rawCredentials['username'] ?? $rawCredentials['email'] ?? ''));
+            $password = trim((string) ($rawCredentials['password'] ?? ''));
+            $endpointUrl = trim((string) ($rawCredentials['endpoint_url'] ?? $rawCredentials['login_url'] ?? $website->target_url));
             $apiKey = trim((string) ($rawCredentials['api_key'] ?? ''));
-            if ($endpointUrl === '' || !filter_var($endpointUrl, FILTER_VALIDATE_URL) || !preg_match('#^https?://#i', $endpointUrl)) {
-                return $this->error('Custom Website integration requires a valid HTTP/HTTPS endpoint_url.', 'INVALID_CREDENTIALS', null, 422);
-            }
-            if ($apiKey === '') {
-                return $this->error('Custom Website integration requires an api_key (Bearer token or API secret).', 'INVALID_CREDENTIALS', null, 422);
-            }
-            $rawCredentials['endpoint_url'] = $endpointUrl;
-            $rawCredentials['api_key'] = $apiKey;
-            $rawCredentials['auth_header'] = trim((string) ($rawCredentials['auth_header'] ?? 'Authorization')) ?: 'Authorization';
-            if (!empty($rawCredentials['webhook_secret'])) {
-                $rawCredentials['webhook_secret'] = trim((string) $rawCredentials['webhook_secret']);
+
+            $isAdminLogin = $username !== '' || $password !== '';
+
+            if ($isAdminLogin) {
+                if ($username === '' || $password === '') {
+                    return $this->error('Custom website integration requires both Admin Username/Email and Password.', 'INVALID_CREDENTIALS', null, 422);
+                }
+                if ($endpointUrl !== '' && !preg_match('#^https?://#i', $endpointUrl)) {
+                    $endpointUrl = 'https://' . ltrim($endpointUrl, '/');
+                }
+                if (!filter_var($endpointUrl, FILTER_VALIDATE_URL)) {
+                    return $this->error('Please enter a valid Admin Login / Site URL.', 'INVALID_CREDENTIALS', null, 422);
+                }
+                $rawCredentials = [
+                    'auth_type' => 'admin_login',
+                    'login_url' => $endpointUrl,
+                    'username' => $username,
+                    'password' => $password,
+                ];
+            } else {
+                if ($endpointUrl === '' || !filter_var($endpointUrl, FILTER_VALIDATE_URL) || !preg_match('#^https?://#i', $endpointUrl)) {
+                    return $this->error('Custom Website integration requires a valid HTTP/HTTPS endpoint_url or Admin Username & Password.', 'INVALID_CREDENTIALS', null, 422);
+                }
+                if ($apiKey === '') {
+                    return $this->error('Custom Website integration requires either Admin Username & Password or an API Key.', 'INVALID_CREDENTIALS', null, 422);
+                }
+                $rawCredentials['auth_type'] = 'api_key';
+                $rawCredentials['endpoint_url'] = $endpointUrl;
+                $rawCredentials['api_key'] = $apiKey;
+                $rawCredentials['auth_header'] = trim((string) ($rawCredentials['auth_header'] ?? 'Authorization')) ?: 'Authorization';
+                if (!empty($rawCredentials['webhook_secret'])) {
+                    $rawCredentials['webhook_secret'] = trim((string) $rawCredentials['webhook_secret']);
+                }
             }
         }
 
@@ -123,9 +147,16 @@ class WebsiteIntegrationController extends Controller
         $integration->status = WebsiteIntegration::STATUS_PENDING;
         $extraMeta = [];
         if ($provider === WebsiteIntegration::PROVIDER_CUSTOM_WEBHOOK) {
-            $extraMeta['endpoint_url'] = $rawCredentials['endpoint_url'];
-            $extraMeta['auth_header'] = $rawCredentials['auth_header'];
-            $extraMeta['has_signing_secret'] = !empty($rawCredentials['webhook_secret']);
+            if (($rawCredentials['auth_type'] ?? '') === 'admin_login') {
+                $extraMeta['auth_type'] = 'admin_login';
+                $extraMeta['login_url'] = $rawCredentials['login_url'];
+                $extraMeta['username'] = $rawCredentials['username'];
+            } else {
+                $extraMeta['auth_type'] = 'api_key';
+                $extraMeta['endpoint_url'] = $rawCredentials['endpoint_url'];
+                $extraMeta['auth_header'] = $rawCredentials['auth_header'];
+                $extraMeta['has_signing_secret'] = !empty($rawCredentials['webhook_secret']);
+            }
         }
         $integration->metadata = array_merge($validated['metadata'] ?? [], $extraMeta, [
             'configured_at' => now()->toIso8601String(),
@@ -221,47 +252,97 @@ class WebsiteIntegrationController extends Controller
                 $error = 'Connection failed: ' . $e->getMessage();
             }
         } elseif ($provider === WebsiteIntegration::PROVIDER_CUSTOM_WEBHOOK) {
-            try {
-                $endpoint = trim((string) ($credentials['endpoint_url'] ?? ''));
-                $apiKey = (string) ($credentials['api_key'] ?? '');
-                $authHeader = trim((string) ($credentials['auth_header'] ?? 'Authorization')) ?: 'Authorization';
-                $webhookSecret = (string) ($credentials['webhook_secret'] ?? '');
+            if (($credentials['auth_type'] ?? '') === 'admin_login' || (!empty($credentials['username']) && !empty($credentials['password']))) {
+                try {
+                    $loginUrl = trim((string) ($credentials['login_url'] ?? $website->target_url));
+                    $username = (string) ($credentials['username'] ?? '');
+                    $password = (string) ($credentials['password'] ?? '');
 
-                $payload = [
-                    'event' => 'ping',
-                    'source' => 'web-seo-ai',
-                    'website_id' => $website->id,
-                    'domain' => $website->domain,
-                    'timestamp' => now()->toIso8601String(),
-                ];
+                    // If the URL looks like a JSON/API auth endpoint, attempt credential handshake
+                    if (preg_match('#/api/|/auth/|/login$#i', $loginUrl) && str_contains(strtolower($loginUrl), '/api/')) {
+                        $res = Http::withHeaders([
+                            'Accept' => 'application/json',
+                            'User-Agent' => 'WebSEOAI-Connector/1.0',
+                        ])->timeout(10)->post($loginUrl, [
+                            'email' => $username,
+                            'username' => $username,
+                            'password' => $password,
+                        ]);
 
-                $headers = [
-                    'Accept' => 'application/json',
-                    'User-Agent' => 'WebSEOAI-Webhook/1.0',
-                    $authHeader => strcasecmp($authHeader, 'Authorization') === 0
-                        ? (str_starts_with($apiKey, 'Bearer ') ? $apiKey : "Bearer {$apiKey}")
-                        : $apiKey,
-                ];
+                        if ($res->successful()) {
+                            $isConnected = true;
+                            $metadata = $integration->metadata ?? [];
+                            $metadata['login_url'] = $loginUrl;
+                            $metadata['username'] = $username;
+                            $metadata['last_http_status'] = $res->status();
+                            $integration->metadata = $metadata;
+                        } else {
+                            $error = 'Admin API login failed (HTTP ' . $res->status() . '): ' . ($res->json('message') ?? 'Invalid credentials');
+                        }
+                    } else {
+                        // Standard Custom Website Admin URL: verify live reachability (with Basic Auth support if protected)
+                        $res = Http::withBasicAuth($username, $password)
+                            ->withHeaders(['User-Agent' => 'Mozilla/5.0 (compatible; WebSEOAI-Connector/1.0)'])
+                            ->timeout(10)
+                            ->get($loginUrl);
 
-                if ($webhookSecret !== '') {
-                    $headers['X-WebSEOAI-Signature'] = hash_hmac('sha256', json_encode($payload), $webhookSecret);
+                        if ($res->successful()) {
+                            $isConnected = true;
+                            $metadata = $integration->metadata ?? [];
+                            $metadata['login_url'] = $loginUrl;
+                            $metadata['username'] = $username;
+                            $metadata['last_http_status'] = $res->status();
+                            $integration->metadata = $metadata;
+                        } else {
+                            $error = 'Custom Admin URL responded with HTTP ' . $res->status() . '. Please check your Admin URL and credentials.';
+                        }
+                    }
+                } catch (Throwable $e) {
+                    $error = 'Custom Admin connection failed: ' . $e->getMessage();
                 }
+            } else {
+                try {
+                    $endpoint = trim((string) ($credentials['endpoint_url'] ?? ''));
+                    $apiKey = (string) ($credentials['api_key'] ?? '');
+                    $authHeader = trim((string) ($credentials['auth_header'] ?? 'Authorization')) ?: 'Authorization';
+                    $webhookSecret = (string) ($credentials['webhook_secret'] ?? '');
 
-                $res = Http::withHeaders($headers)
-                    ->timeout(10)
-                    ->post($endpoint, $payload);
+                    $payload = [
+                        'event' => 'ping',
+                        'source' => 'web-seo-ai',
+                        'website_id' => $website->id,
+                        'domain' => $website->domain,
+                        'timestamp' => now()->toIso8601String(),
+                    ];
 
-                if ($res->successful()) {
-                    $isConnected = true;
-                    $metadata = $integration->metadata ?? [];
-                    $metadata['endpoint_url'] = $endpoint;
-                    $metadata['last_http_status'] = $res->status();
-                    $integration->metadata = $metadata;
-                } else {
-                    $error = 'Custom Webhook responded with HTTP ' . $res->status() . ': ' . ($res->json('message') ?? $res->json('error') ?? 'Endpoint rejected handshake');
+                    $headers = [
+                        'Accept' => 'application/json',
+                        'User-Agent' => 'WebSEOAI-Webhook/1.0',
+                        $authHeader => strcasecmp($authHeader, 'Authorization') === 0
+                            ? (str_starts_with($apiKey, 'Bearer ') ? $apiKey : "Bearer {$apiKey}")
+                            : $apiKey,
+                    ];
+
+                    if ($webhookSecret !== '') {
+                        $headers['X-WebSEOAI-Signature'] = hash_hmac('sha256', json_encode($payload), $webhookSecret);
+                    }
+
+                    $res = Http::withHeaders($headers)
+                        ->timeout(10)
+                        ->post($endpoint, $payload);
+
+                    if ($res->successful()) {
+                        $isConnected = true;
+                        $metadata = $integration->metadata ?? [];
+                        $metadata['endpoint_url'] = $endpoint;
+                        $metadata['last_http_status'] = $res->status();
+                        $integration->metadata = $metadata;
+                    } else {
+                        $error = 'Custom Webhook responded with HTTP ' . $res->status() . ': ' . ($res->json('message') ?? $res->json('error') ?? 'Endpoint rejected handshake');
+                    }
+                } catch (Throwable $e) {
+                    $error = 'Custom Webhook connection failed: ' . $e->getMessage();
                 }
-            } catch (Throwable $e) {
-                $error = 'Custom Webhook connection failed: ' . $e->getMessage();
             }
         }
 

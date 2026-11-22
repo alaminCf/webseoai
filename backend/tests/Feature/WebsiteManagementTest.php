@@ -318,11 +318,37 @@ class WebsiteManagementTest extends TestCase
         $overrideRes->assertOk()->assertJsonPath('data.verified', true);
         $this->assertTrue($agencySite->fresh()->isVerified());
 
-        // 6. Custom Website REST API / Webhook integration saves encrypted credentials and passes live ping test
+        // 6. Custom Website simple Admin Username & Password login saves encrypted credentials and passes connection test
         \Illuminate\Support\Facades\Http::fake([
+            'https://agencyclient.com/admin' => \Illuminate\Support\Facades\Http::response('<html>Admin Panel</html>', 200),
             'https://agencyclient.com/api/seo-webhook' => \Illuminate\Support\Facades\Http::response(['ok' => true], 200),
         ]);
 
+        $adminLoginSave = $this->actingAs($seoManager)
+            ->withHeader('X-Organization-Id', (string) $this->organization->id)
+            ->postJson("/api/v1/websites/{$agencySite->id}/integrations", [
+                'provider' => 'custom_webhook',
+                'credentials' => [
+                    'username' => 'admin@agencyclient.com',
+                    'password' => 'SuperSecret123!',
+                    'login_url' => 'https://agencyclient.com/admin',
+                ],
+            ]);
+
+        $adminLoginSave->assertStatus(201)
+            ->assertJsonPath('data.provider', 'custom_webhook')
+            ->assertJsonPath('data.metadata.auth_type', 'admin_login')
+            ->assertJsonPath('data.metadata.username', 'admin@agencyclient.com');
+
+        $adminLoginTest = $this->actingAs($seoManager)
+            ->withHeader('X-Organization-Id', (string) $this->organization->id)
+            ->postJson("/api/v1/websites/{$agencySite->id}/integrations/custom_webhook/test");
+
+        $adminLoginTest->assertOk()
+            ->assertJsonPath('data.connected', true)
+            ->assertJsonPath('data.status', 'connected');
+
+        // Also supports optional API key / webhook mode
         $customSaveRes = $this->actingAs($seoManager)
             ->withHeader('X-Organization-Id', (string) $this->organization->id)
             ->postJson("/api/v1/websites/{$agencySite->id}/integrations", [
