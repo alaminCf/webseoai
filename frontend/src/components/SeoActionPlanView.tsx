@@ -22,6 +22,7 @@ import {
   Zap,
   Wrench,
   AlertTriangle,
+  Radar,
 } from 'lucide-react';
 import { Website, AiRecommendation, CmsChangeRequest, CmsSnapshot } from '@/types';
 import { api } from '@/lib/api';
@@ -81,6 +82,7 @@ export function SeoActionPlanView({
   const [stageTargetUrl, setStageTargetUrl] = useState<string>('');
 
   const [actionLoadingId, setActionLoadingId] = useState<number | null>(null);
+  const [verifyingRecId, setVerifyingRecId] = useState<number | null>(null);
 
   const loadData = useCallback(async () => {
     if (!website) return;
@@ -165,6 +167,38 @@ export function SeoActionPlanView({
       toast.error('Network error updating status.');
     } finally {
       setActionLoadingId(null);
+    }
+  };
+
+  // Live-verify a recommendation directly against the live website URL
+  const handleVerifyLive = async (recId: number) => {
+    setVerifyingRecId(recId);
+    try {
+      const res = await api.post<{
+        verified: boolean;
+        live_verification: {
+          verified: boolean;
+          checked_at: string;
+          http_status: number;
+          summary: string;
+        };
+        recommendation: AiRecommendation;
+      }>(`/recommendations/${recId}/verify`);
+
+      if (res.success && res.data) {
+        if (res.data.verified) {
+          toast.success(res.data.live_verification.summary);
+        } else {
+          toast.error(res.data.live_verification.summary);
+        }
+        await loadData();
+      } else {
+        toast.error(res.error?.message || 'Live verification check failed.');
+      }
+    } catch {
+      toast.error('Network error while checking live URL.');
+    } finally {
+      setVerifyingRecId(null);
     }
   };
 
@@ -614,8 +648,12 @@ export function SeoActionPlanView({
             <div className="space-y-3">
               {filteredRecs.map((rec) => {
                 const isActionLoading = actionLoadingId === rec.id;
+                const isVerifyingLive = verifyingRecId === rec.id;
                 const isApplied = rec.status === 'applied';
                 const isDismissed = rec.status === 'dismissed';
+                const liveCheck = (rec.evidence as Record<string, any> | null | undefined)?.live_verification as
+                  | { verified: boolean; checked_at: string; http_status: number; summary: string }
+                  | undefined;
 
                 return (
                   <div
@@ -699,10 +737,49 @@ export function SeoActionPlanView({
                             <span>{rec.expected_benefit}</span>
                           </div>
                         )}
+
+                        {/* Honest Live Verification Proof Banner */}
+                        {liveCheck && (
+                          <div
+                            className={`mt-2 p-2.5 rounded-xl border text-xs flex items-start gap-2 ${
+                              liveCheck.verified
+                                ? 'bg-emerald-950/40 border-emerald-700/50 text-emerald-200'
+                                : 'bg-rose-950/40 border-rose-800/60 text-rose-200'
+                            }`}
+                          >
+                            {liveCheck.verified ? (
+                              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                            ) : (
+                              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                            )}
+                            <div className="space-y-0.5">
+                              <div className="font-semibold">
+                                {liveCheck.verified ? 'Live Verified Fixed' : 'Live Check Failed — Not Fixed Yet'}
+                                {liveCheck.http_status > 0 && (
+                                  <span className="ml-2 font-mono text-[10px] px-1.5 py-0.5 rounded bg-black/40">
+                                    HTTP {liveCheck.http_status}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[11px] opacity-90">{liveCheck.summary}</div>
+                              <div className="text-[10px] opacity-60">
+                                Checked live at {new Date(liveCheck.checked_at).toLocaleString()}
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
 
                       {/* Action Buttons */}
                       <div className="flex flex-wrap md:flex-col items-stretch gap-2 shrink-0 md:w-44">
+                        <button
+                          onClick={() => handleVerifyLive(rec.id)}
+                          disabled={isVerifyingLive || isActionLoading}
+                          className="inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-zinc-900 hover:bg-emerald-950/60 border border-emerald-700/50 hover:border-emerald-500/70 disabled:opacity-50 text-emerald-300 font-semibold rounded-xl text-xs transition"
+                        >
+                          <Radar className={`w-3.5 h-3.5 ${isVerifyingLive ? 'animate-spin' : ''}`} />
+                          <span>{isVerifyingLive ? 'Checking Live...' : 'Verify Fix Live'}</span>
+                        </button>
                         {canPushToCms && !isApplied && !isDismissed && (
                           <button
                             onClick={() => openStageModal(rec)}

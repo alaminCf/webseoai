@@ -223,6 +223,26 @@ class AiStrategistAndContentStudioTest extends TestCase
         $listRes->assertStatus(200)
             ->assertJsonPath('meta.summary.accepted', 1)
             ->assertJsonPath('meta.summary.total', 1);
+
+        // 6. Live Fix Verification: returns verified=false when URL is still 404, then verified=true when 200 OK
+        \Illuminate\Support\Facades\Http::fake([
+            'https://cloudsaas.io/pricing-v1' => \Illuminate\Support\Facades\Http::sequence()
+                ->push('Not Found', 404)
+                ->push('<html><head><title>Pricing | CloudSaas</title></head><body><h1>Pricing</h1></body></html>', 200),
+        ]);
+
+        $failVerify = $this->actingAs($this->seoManager)->withHeaders(['X-Organization-Id' => $this->organization->id])
+            ->postJson("/api/v1/recommendations/{$freshId}/verify");
+        $failVerify->assertStatus(200)
+            ->assertJsonPath('data.verified', false)
+            ->assertJsonPath('data.live_verification.http_status', 404);
+
+        $passVerify = $this->actingAs($this->seoManager)->withHeaders(['X-Organization-Id' => $this->organization->id])
+            ->postJson("/api/v1/recommendations/{$freshId}/verify");
+        $passVerify->assertStatus(200)
+            ->assertJsonPath('data.verified', true)
+            ->assertJsonPath('data.live_verification.http_status', 200)
+            ->assertJsonPath('data.recommendation.status', 'applied');
     }
 
     public function test_content_studio_brief_outline_and_title_meta_generation(): void

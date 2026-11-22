@@ -141,6 +141,7 @@ Route::prefix('v1')->group(function () {
             Route::get('/websites/{id}/recommendations', [AiRecommendationController::class, 'listRecommendations']);
             Route::post('/websites/{id}/recommendations/generate', [AiRecommendationController::class, 'generateRecommendations']);
             Route::patch('/recommendations/{id}/status', [AiRecommendationController::class, 'updateStatus']);
+            Route::post('/recommendations/{id}/verify', [AiRecommendationController::class, 'verifyLive']);
 
             // Phase 3: Content Studio
             Route::get('/websites/{id}/content/briefs', [ContentStudioController::class, 'listBriefs']);
