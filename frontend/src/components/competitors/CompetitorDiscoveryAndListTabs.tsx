@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Globe,
   Plus,
@@ -15,6 +15,9 @@ import {
   RefreshCw,
   ShieldCheck,
   Info,
+  Filter,
+  Link2,
+  Tag,
 } from 'lucide-react';
 import {
   Website,
@@ -316,7 +319,45 @@ export function MyCompetitorsTab({
   const [isDiscovering, setIsDiscovering] = useState(false);
   const [discoveryRun, setDiscoveryRun] = useState<CompetitorDiscoveryRun | null>(null);
   const [selectedDomains, setSelectedDomains] = useState<Record<string, boolean>>({});
+  const [candidateOverrides, setCandidateOverrides] = useState<
+    Record<string, { category: CompetitorCategory; tier: CompetitorTier }>
+  >({});
+  const [hidePortals, setHidePortals] = useState(true);
   const [isConfirming, setIsConfirming] = useState(false);
+
+  const hydrateDiscoveryRun = (run: CompetitorDiscoveryRun) => {
+    setDiscoveryRun(run);
+    const preselected: Record<string, boolean> = {};
+    const overrides: Record<string, { category: CompetitorCategory; tier: CompetitorTier }> = {};
+    (run.candidates || []).forEach((c) => {
+      overrides[c.domain] = {
+        category: c.category,
+        tier: c.category === 'direct' ? 'primary' : 'secondary',
+      };
+      if (!c.already_tracked && !c.is_portal_filtered && c.category === 'direct' && c.confidence >= 65) {
+        preselected[c.domain] = true;
+      }
+    });
+    setSelectedDomains(preselected);
+    setCandidateOverrides(overrides);
+  };
+
+  useEffect(() => {
+    let active = true;
+    api
+      .get<CompetitorDiscoveryRun[]>(`/websites/${website.id}/competitors/discoveries`)
+      .then((res) => {
+        if (active && res.success && Array.isArray(res.data) && res.data.length > 0) {
+          hydrateDiscoveryRun(res.data[0]);
+        } else if (active) {
+          setDiscoveryRun(null);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [website.id]);
 
   const handleManualAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -342,7 +383,7 @@ export function MyCompetitorsTab({
     }
   };
 
-  const handleDiscover = async () => {
+  const handleDiscover = async (forceRefresh = false) => {
     setIsDiscovering(true);
     try {
       const res = await api.post<CompetitorDiscoveryRun>(`/websites/${website.id}/competitors/discover`, {
@@ -350,17 +391,17 @@ export function MyCompetitorsTab({
         language,
         search_engine: 'google',
         industry_context: industryHint.trim() || undefined,
+        force_refresh: forceRefresh,
       });
       if (res.success && res.data) {
-        setDiscoveryRun(res.data);
-        const preselected: Record<string, boolean> = {};
-        (res.data.candidates || []).forEach((c) => {
-          if (!c.already_tracked && !c.is_portal_filtered && c.confidence >= 60) {
-            preselected[c.domain] = true;
-          }
-        });
-        setSelectedDomains(preselected);
-        toast.success(`Discovery complete: found ${(res.data.candidates || []).length} candidate domain(s) for review.`);
+        hydrateDiscoveryRun(res.data);
+        const total = (res.data.candidates || []).length;
+        const directCount = (res.data.candidates || []).filter((c) => c.category === 'direct').length;
+        if (total > 0) {
+          toast.success(`Discovery complete: found ${total} candidate(s) (${directCount} direct rivals) for review.`);
+        } else {
+          toast.info('Discovery finished with 0 candidates. Check methodology notice below.');
+        }
       } else {
         toast.error(res.error?.message || 'Competitor discovery failed.');
       }
@@ -369,11 +410,26 @@ export function MyCompetitorsTab({
     }
   };
 
+  const handleSelectAllDirect = () => {
+    if (!discoveryRun) return;
+    const next = { ...selectedDomains };
+    (discoveryRun.candidates || []).forEach((c) => {
+      if (!c.already_tracked && !c.is_portal_filtered && (candidateOverrides[c.domain]?.category ?? c.category) === 'direct') {
+        next[c.domain] = true;
+      }
+    });
+    setSelectedDomains(next);
+  };
+
   const handleConfirmSelected = async () => {
     if (!discoveryRun) return;
     const chosen = (discoveryRun.candidates || [])
       .filter((c) => selectedDomains[c.domain] && !c.already_tracked)
-      .map((c) => ({ domain: c.domain, category: c.category, tier: 'primary' }));
+      .map((c) => ({
+        domain: c.domain,
+        category: candidateOverrides[c.domain]?.category ?? c.category,
+        tier: candidateOverrides[c.domain]?.tier ?? (c.category === 'direct' ? 'primary' : 'secondary'),
+      }));
 
     if (chosen.length === 0) {
       toast.error('Select at least one candidate domain to confirm.');
@@ -509,99 +565,318 @@ export function MyCompetitorsTab({
               />
             </div>
 
-            <button
-              type="button"
-              onClick={handleDiscover}
-              disabled={isDiscovering}
-              className="w-full py-2.5 px-4 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-semibold rounded-xl transition flex items-center justify-center gap-2"
-            >
-              <Sparkles className={`w-4 h-4 ${isDiscovering ? 'animate-spin' : ''}`} />
-              <span>{isDiscovering ? 'Discovering Competitors...' : `Discover Competitors (${country} / ${language})`}</span>
-            </button>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => handleDiscover(false)}
+                disabled={isDiscovering}
+                className="flex-1 py-2.5 px-4 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-semibold rounded-xl transition flex items-center justify-center gap-2"
+              >
+                <Sparkles className={`w-4 h-4 ${isDiscovering ? 'animate-spin' : ''}`} />
+                <span>{isDiscovering ? 'Scanning Live Search...' : `Discover Competitors (${country} / ${language})`}</span>
+              </button>
+              {discoveryRun && (
+                <button
+                  type="button"
+                  onClick={() => handleDiscover(true)}
+                  disabled={isDiscovering}
+                  title="Bypass cache and run fresh discovery"
+                  className="px-3 py-2.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 rounded-xl transition flex items-center gap-1.5"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isDiscovering ? 'animate-spin' : ''}`} />
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>
 
       {/* Discovery Candidate Review Panel (Requires Manual Confirmation) */}
-      {discoveryRun && (
-        <div className="p-5 bg-zinc-950 border border-sky-800/50 rounded-2xl space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <h4 className="text-sm font-bold text-zinc-100">
-                Discovery Results — Review &amp; Confirm ({discoveryRun.candidates?.length || 0} candidates)
-              </h4>
-              <p className="text-[11px] text-zinc-400 mt-0.5">
-                <strong>Methodology ({discoveryRun.provider}):</strong> {discoveryRun.methodology}
-              </p>
+      {discoveryRun && (() => {
+        const allCandidates = discoveryRun.candidates || [];
+        const directCount = allCandidates.filter((c) => c.category === 'direct').length;
+        const organicOrContentCount = allCandidates.filter((c) => c.category === 'organic_search' || c.category === 'content').length;
+        const portalCount = allCandidates.filter((c) => c.is_portal_filtered).length;
+        const visibleCandidates = hidePortals ? allCandidates.filter((c) => !c.is_portal_filtered) : allCandidates;
+        const selectedCount = allCandidates.filter((c) => selectedDomains[c.domain] && !c.already_tracked).length;
+
+        return (
+          <div className="p-5 bg-zinc-950 border border-sky-800/50 rounded-2xl space-y-4">
+            <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-3">
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h4 className="text-sm font-bold text-zinc-100">
+                    Discovery Results — Review &amp; Confirm ({allCandidates.length} candidates)
+                  </h4>
+                  {directCount > 0 && (
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                      {directCount} Direct Rivals
+                    </span>
+                  )}
+                  {organicOrContentCount > 0 && (
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-400 border border-sky-500/30">
+                      {organicOrContentCount} Organic / Content
+                    </span>
+                  )}
+                  {portalCount > 0 && (
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                      {portalCount} Portals Filtered
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] text-zinc-400 leading-relaxed">
+                  <strong>Methodology ({discoveryRun.provider}):</strong> {discoveryRun.methodology}
+                </p>
+              </div>
+
+              {allCandidates.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {directCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={handleSelectAllDirect}
+                      className="px-3 py-2 text-[11px] font-semibold text-zinc-200 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-xl transition"
+                    >
+                      Select All Direct ({directCount})
+                    </button>
+                  )}
+                  {portalCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setHidePortals((prev) => !prev)}
+                      className={`px-3 py-2 text-[11px] font-semibold rounded-xl border transition inline-flex items-center gap-1.5 ${
+                        hidePortals
+                          ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                          : 'bg-zinc-900 text-zinc-300 border-zinc-800'
+                      }`}
+                    >
+                      <Filter className="w-3 h-3" />
+                      <span>{hidePortals ? `Show Portals (${portalCount})` : `Hide Portals (${portalCount})`}</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleConfirmSelected}
+                    disabled={isConfirming || selectedCount === 0}
+                    className="px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-xl transition"
+                  >
+                    {isConfirming ? 'Confirming...' : `Confirm & Add Selected (${selectedCount})`}
+                  </button>
+                </div>
+              )}
             </div>
-            {(discoveryRun.candidates || []).length > 0 && (
-              <button
-                type="button"
-                onClick={handleConfirmSelected}
-                disabled={isConfirming}
-                className="px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-xl transition"
-              >
-                {isConfirming ? 'Confirming...' : 'Confirm & Add Selected'}
-              </button>
+
+            {allCandidates.length === 0 ? (
+              <div className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800 text-xs text-zinc-300 flex items-start gap-2.5">
+                <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <div className="font-semibold text-zinc-200">No external SERP candidates returned for this run</div>
+                  <p className="text-zinc-400">
+                    {discoveryRun.error_message || 'Enter a specific Industry / Niche phrase above (e.g. "home nursing caregiver service Bangladesh") and retry, or add a free SERPER_API_KEY (2,500 free Google searches) or DATAFORSEO credentials in Vercel Environment Variables.'}
+                  </p>
+                </div>
+              </div>
+            ) : visibleCandidates.length === 0 ? (
+              <div className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800 text-xs text-zinc-400 flex items-center justify-between gap-2">
+                <span>All {portalCount} discovered domains were broad portals/directories and are currently hidden.</span>
+                <button
+                  type="button"
+                  onClick={() => setHidePortals(false)}
+                  className="text-sky-400 hover:text-sky-300 font-semibold"
+                >
+                  Show Filtered Portals
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-2.5">
+                {visibleCandidates.map((cand) => {
+                  const activeCategory = candidateOverrides[cand.domain]?.category ?? cand.category;
+                  const activeTier = candidateOverrides[cand.domain]?.tier ?? (cand.category === 'direct' ? 'primary' : 'secondary');
+                  const isChecked = Boolean(selectedDomains[cand.domain]) || cand.already_tracked;
+
+                  return (
+                    <div
+                      key={cand.domain}
+                      className={`p-4 rounded-xl border transition ${
+                        isChecked
+                          ? 'bg-emerald-950/15 border-emerald-700/50'
+                          : 'bg-zinc-900/60 border-zinc-800 hover:border-zinc-700'
+                      }`}
+                    >
+                      <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-3">
+                        <div className="flex items-start gap-3 flex-1 min-w-0">
+                          <input
+                            type="checkbox"
+                            disabled={cand.already_tracked}
+                            checked={isChecked}
+                            onChange={(e) =>
+                              setSelectedDomains((prev) => ({ ...prev, [cand.domain]: e.target.checked }))
+                            }
+                            className="mt-1 h-4 w-4 accent-emerald-500 cursor-pointer shrink-0"
+                          />
+                          <div className="space-y-1.5 flex-1 min-w-0">
+                            {/* Header line: Domain + Badges */}
+                            <div className="flex flex-wrap items-center gap-2">
+                              <a
+                                href={`https://${cand.domain}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-xs font-bold text-zinc-100 hover:text-emerald-400 inline-flex items-center gap-1"
+                              >
+                                {cand.domain}
+                                <ExternalLink className="w-3 h-3 text-zinc-500" />
+                              </a>
+                              <span
+                                className={`text-[10px] font-semibold uppercase px-2 py-0.5 rounded-full border ${
+                                  activeCategory === 'direct'
+                                    ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                                    : activeCategory === 'organic_search'
+                                    ? 'bg-sky-500/15 text-sky-400 border-sky-500/30'
+                                    : activeCategory === 'content'
+                                    ? 'bg-purple-500/15 text-purple-400 border-purple-500/30'
+                                    : 'bg-zinc-900 text-zinc-400 border-zinc-700'
+                                }`}
+                              >
+                                {activeCategory.replace('_', ' ')}
+                              </span>
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-950 border border-zinc-800 text-emerald-400">
+                                Confidence {cand.confidence}%
+                              </span>
+                              {cand.avg_position != null && (
+                                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-950 border border-zinc-800 text-sky-300">
+                                  Avg Rank #{cand.avg_position}
+                                </span>
+                              )}
+                              {cand.serp_overlap_pct != null && (
+                                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-zinc-950 border border-zinc-800 text-zinc-300">
+                                  {cand.serp_overlap_pct}% overlap
+                                </span>
+                              )}
+                              {cand.is_portal_filtered && (
+                                <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                                  Portal Filtered
+                                </span>
+                              )}
+                              {cand.already_tracked && (
+                                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                  Already Tracked
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Observed Page Title & Snippet */}
+                            {cand.sample_title && (
+                              <div className="text-xs font-medium text-zinc-200 leading-snug">
+                                {cand.sample_title}
+                              </div>
+                            )}
+                            {cand.sample_snippet && (
+                              <p className="text-[11px] text-zinc-400 leading-relaxed line-clamp-2">
+                                {cand.sample_snippet}
+                              </p>
+                            )}
+
+                            {/* Matched Queries & Niche Terms */}
+                            {((cand.matched_queries && cand.matched_queries.length > 0) ||
+                              (cand.matched_service_terms && cand.matched_service_terms.length > 0)) && (
+                              <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                                {(cand.matched_queries || []).map((q) => (
+                                  <span
+                                    key={q}
+                                    className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md bg-sky-500/10 text-sky-300 border border-sky-500/20"
+                                  >
+                                    <Search className="w-2.5 h-2.5" />
+                                    {q}
+                                  </span>
+                                ))}
+                                {(cand.matched_service_terms || []).slice(0, 5).map((term) => (
+                                  <span
+                                    key={term}
+                                    className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md bg-zinc-950 text-zinc-400 border border-zinc-800"
+                                  >
+                                    <Tag className="w-2.5 h-2.5 text-emerald-500" />
+                                    {term}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+
+                            {/* Ranking Sample URLs */}
+                            {cand.sample_urls && cand.sample_urls.length > 0 && (
+                              <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                                {cand.sample_urls.slice(0, 2).map((u) => (
+                                  <a
+                                    key={u}
+                                    href={u}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 text-[10px] font-mono text-zinc-400 hover:text-emerald-400 truncate max-w-md"
+                                  >
+                                    <Link2 className="w-2.5 h-2.5 shrink-0" />
+                                    <span className="truncate">{u}</span>
+                                  </a>
+                                ))}
+                              </div>
+                            )}
+
+                            {/* Relevance Rationale */}
+                            <p className="text-[11px] text-zinc-500">{cand.relevance_reason}</p>
+                          </div>
+                        </div>
+
+                        {/* Inline Category & Tier Controls before Confirm */}
+                        <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 shrink-0 pl-7 lg:pl-0">
+                          {!cand.already_tracked && (
+                            <>
+                              <select
+                                value={activeCategory}
+                                onChange={(e) =>
+                                  setCandidateOverrides((prev) => ({
+                                    ...prev,
+                                    [cand.domain]: {
+                                      category: e.target.value as CompetitorCategory,
+                                      tier: activeTier,
+                                    },
+                                  }))
+                                }
+                                className="bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1 text-[11px] text-zinc-200"
+                              >
+                                <option value="direct">Direct</option>
+                                <option value="organic_search">Organic Search</option>
+                                <option value="content">Content</option>
+                                <option value="indirect">Indirect</option>
+                              </select>
+                              <select
+                                value={activeTier}
+                                onChange={(e) =>
+                                  setCandidateOverrides((prev) => ({
+                                    ...prev,
+                                    [cand.domain]: {
+                                      category: activeCategory,
+                                      tier: e.target.value as CompetitorTier,
+                                    },
+                                  }))
+                                }
+                                className="bg-zinc-950 border border-zinc-800 rounded-lg px-2 py-1 text-[11px] text-zinc-200"
+                              >
+                                <option value="primary">Primary</option>
+                                <option value="secondary">Secondary</option>
+                              </select>
+                            </>
+                          )}
+                          <span className="text-[10px] font-mono text-zinc-500 whitespace-nowrap">
+                            {cand.shared_keywords !== null ? `${cand.shared_keywords} query match` : cand.source}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             )}
           </div>
-
-          {(discoveryRun.candidates || []).length === 0 ? (
-            <div className="p-4 rounded-xl bg-zinc-900/60 border border-zinc-800 text-xs text-zinc-400 flex items-start gap-2">
-              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-              <span>
-                No external SERP overlap candidates returned ({discoveryRun.error_message || 'connect DataForSEO, Semrush, or SerpApi to enable automated discovery, or add competitors manually above'}).
-              </span>
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {discoveryRun.candidates.map((cand) => (
-                <label
-                  key={cand.domain}
-                  className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 rounded-xl bg-zinc-900/60 border border-zinc-800 hover:border-zinc-700 cursor-pointer"
-                >
-                  <div className="flex items-start gap-3">
-                    <input
-                      type="checkbox"
-                      disabled={cand.already_tracked}
-                      checked={Boolean(selectedDomains[cand.domain]) || cand.already_tracked}
-                      onChange={(e) =>
-                        setSelectedDomains((prev) => ({ ...prev, [cand.domain]: e.target.checked }))
-                      }
-                      className="mt-1 accent-emerald-500"
-                    />
-                    <div className="space-y-0.5">
-                      <div className="text-xs font-bold text-zinc-100 flex flex-wrap items-center gap-2">
-                        <span>{cand.domain}</span>
-                        <span className="text-[10px] uppercase px-2 py-0.5 rounded-full bg-zinc-950 border border-zinc-700 text-zinc-300">
-                          {cand.category.replace('_', ' ')}
-                        </span>
-                        <span className="text-[10px] font-mono text-emerald-400">
-                          Confidence: {cand.confidence}%
-                        </span>
-                        {cand.is_portal_filtered && (
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/30">
-                            Portal Filtered
-                          </span>
-                        )}
-                        {cand.already_tracked && (
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400">
-                            Already Tracked
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-zinc-400">{cand.relevance_reason}</p>
-                    </div>
-                  </div>
-                  <div className="text-[11px] font-mono text-zinc-400 shrink-0">
-                    {cand.shared_keywords !== null ? `${cand.shared_keywords} shared kw` : 'Profile match'}
-                  </div>
-                </label>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+        );
+      })()}
 
       {/* Tracked Competitors Management Table */}
       <div className="bg-zinc-950 border border-zinc-800/80 rounded-2xl overflow-hidden">

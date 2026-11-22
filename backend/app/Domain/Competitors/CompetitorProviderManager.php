@@ -8,6 +8,7 @@ use App\Domain\Competitors\Providers\DataForSeoProvider;
 use App\Domain\Competitors\Providers\FirstPartyCrawlProvider;
 use App\Domain\Competitors\Providers\SemrushProvider;
 use App\Domain\Competitors\Providers\SerpApiProvider;
+use App\Domain\Competitors\Providers\SerperProvider;
 use App\Models\CompetitorProviderLog;
 use App\Models\Website;
 use Illuminate\Support\Facades\Cache;
@@ -24,6 +25,7 @@ class CompetitorProviderManager
             'semrush' => new SemrushProvider(),
             'ahrefs' => new AhrefsProvider(),
             'serpapi' => new SerpApiProvider(),
+            'serper' => new SerperProvider(),
             'first_party_crawl' => new FirstPartyCrawlProvider(),
         ];
     }
@@ -34,10 +36,10 @@ class CompetitorProviderManager
     public function resolveForCapability(string $capability): CompetitorProviderInterface
     {
         $priorityOrder = match ($capability) {
-            'serp' => ['dataforseo', 'serpapi', 'first_party_crawl'],
+            'serp' => ['dataforseo', 'serper', 'serpapi', 'first_party_crawl'],
             'backlinks' => ['dataforseo', 'ahrefs', 'semrush', 'first_party_crawl'],
             'keywords' => ['dataforseo', 'semrush', 'first_party_crawl'],
-            'discovery' => ['dataforseo', 'semrush', 'serpapi', 'first_party_crawl'],
+            'discovery' => ['dataforseo', 'semrush', 'serper', 'serpapi', 'first_party_crawl'],
             'domain_metrics' => ['dataforseo', 'semrush', 'ahrefs', 'first_party_crawl'],
             default => ['dataforseo', 'first_party_crawl'],
         };
@@ -71,7 +73,7 @@ class CompetitorProviderManager
     public function getStatusSummary(int $organizationId, ?int $websiteId = null): array
     {
         $providers = [];
-        foreach (['dataforseo', 'semrush', 'ahrefs', 'serpapi'] as $key) {
+        foreach (['dataforseo', 'serper', 'semrush', 'ahrefs', 'serpapi'] as $key) {
             $p = $this->providers[$key];
             $cfg = config("competitors.providers.{$key}", []);
             $providers[] = [
@@ -81,6 +83,7 @@ class CompetitorProviderManager
                 'capabilities' => $p->supportedCapabilities(),
                 'required_env_vars' => match ($key) {
                     'dataforseo' => ['DATAFORSEO_LOGIN', 'DATAFORSEO_PASSWORD'],
+                    'serper' => ['SERPER_API_KEY'],
                     'semrush' => ['SEMRUSH_API_KEY'],
                     'ahrefs' => ['AHREFS_API_KEY'],
                     'serpapi' => ['SERPAPI_KEY'],

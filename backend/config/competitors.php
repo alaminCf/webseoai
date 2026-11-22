@@ -42,6 +42,13 @@ return [
             'capabilities' => ['serp', 'discovery'],
             'docs_url' => 'https://serpapi.com/search-api',
         ],
+        'serper' => [
+            'label' => 'Serper.dev (Google Search API)',
+            'api_key' => env('SERPER_API_KEY', ''),
+            'base_url' => rtrim((string) env('SERPER_BASE_URL', 'https://google.serper.dev'), '/'),
+            'capabilities' => ['serp', 'discovery'],
+            'docs_url' => 'https://serper.dev/',
+        ],
     ],
 
     // Country ISO2 to DataForSEO location_code & Semrush database mapping
@@ -58,11 +65,14 @@ return [
         'SG' => ['location_code' => 2702, 'semrush_db' => 'sg', 'gl' => 'sg', 'name' => 'Singapore'],
     ],
 
-    // Generic portals/social sites excluded from "Direct Business Competitor" classification
+    // Generic portals/social/job/classified sites excluded from "Direct Business Competitor" classification
     'non_direct_portal_domains' => [
-        'wikipedia.org', 'youtube.com', 'facebook.com', 'instagram.com', 'linkedin.com',
-        'twitter.com', 'x.com', 'reddit.com', 'quora.com', 'pinterest.com', 'tiktok.com',
-        'amazon.com', 'yelp.com', 'yellowpages.com', 'bbb.org', 'trustpilot.com',
-        'medium.com', 'forbes.com', 'github.com', 'google.com', 'apple.com',
+        'wikipedia.org', 'wikimedia.org', 'britannica.com', 'youtube.com', 'facebook.com', 'instagram.com',
+        'linkedin.com', 'twitter.com', 'x.com', 'reddit.com', 'quora.com', 'pinterest.com', 'tiktok.com',
+        'amazon.com', 'yelp.com', 'yellowpages.com', 'bbb.org', 'trustpilot.com', 'medium.com', 'forbes.com',
+        'github.com', 'google.com', 'apple.com', 'play.google.com', 'apps.apple.com', 'indeed.com',
+        'glassdoor.com', 'bdjobs.com', 'crunchbase.com', 'zoominfo.com', 'justdial.com', 'indiamart.com',
+        'daraz.com.bd', 'bikroy.com', 'bing.com', 'duckduckgo.com', 'yahoo.com', 'tripadvisor.com',
+        'angi.com', 'thumbtack.com', 'homeadvisor.com', 'taskrabbit.com', 'craigslist.org',
     ],
 ];

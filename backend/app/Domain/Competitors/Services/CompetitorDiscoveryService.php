@@ -3,14 +3,66 @@
 namespace App\Domain\Competitors\Services;
 
 use App\Domain\Competitors\CompetitorProviderManager;
+use App\Domain\Crawler\UrlSecurityValidator;
 use App\Models\CompetitorDiscoveryRun;
 use App\Models\CompetitorDomain;
+use App\Models\CrawledPage;
 use App\Models\SearchPerformanceRecord;
 use App\Models\Website;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
+use Throwable;
 
 class CompetitorDiscoveryService
 {
+    private const COUNTRY_NAMES = [
+        'US' => 'USA',
+        'GB' => 'UK',
+        'UK' => 'UK',
+        'BD' => 'Bangladesh',
+        'IN' => 'India',
+        'CA' => 'Canada',
+        'AU' => 'Australia',
+        'PK' => 'Pakistan',
+        'AE' => 'UAE',
+        'SG' => 'Singapore',
+        'MY' => 'Malaysia',
+        'DE' => 'Germany',
+        'FR' => 'France',
+        'NL' => 'Netherlands',
+        'ES' => 'Spain',
+        'IT' => 'Italy',
+        'BR' => 'Brazil',
+        'JP' => 'Japan',
+        'ID' => 'Indonesia',
+        'PH' => 'Philippines',
+        'SA' => 'Saudi Arabia',
+        'NZ' => 'New Zealand',
+        'ZA' => 'South Africa',
+        'NG' => 'Nigeria',
+    ];
+
+    private const STOP_WORDS = [
+        'the', 'and', 'for', 'with', 'from', 'that', 'this', 'your', 'our', 'their', 'into', 'over', 'about',
+        'more', 'most', 'very', 'just', 'only', 'also', 'here', 'there', 'when', 'where', 'what', 'which',
+        'who', 'how', 'why', 'all', 'any', 'both', 'each', 'some', 'such', 'than', 'then', 'them', 'they',
+        'will', 'can', 'may', 'should', 'could', 'would', 'have', 'has', 'had', 'are', 'was', 'were', 'been',
+        'being', 'not', 'but', 'you', 'out', 'off', 'now', 'get', 'got', 'new', 'one', 'two', 'top', 'best',
+        'trusted', 'welcome', 'official', 'website', 'site', 'page', 'online', 'leading', 'premier', 'quality',
+        'professional', 'reliable', 'verified', 'background', 'find', 'across', 'total', 'safety', 'privacy',
+        'peace', 'mind', 'loved', 'ones', 'coordinated', 'admin', 'affordable', 'easy', 'fast', 'free',
+        'home', 'homepage', 'index', 'com', 'org', 'net', 'www', 'http', 'https', 'inc', 'ltd', 'llc',
+        'services', 'service', 'solutions', 'solution', 'company', 'platform', 'agency', 'providers', 'provider',
+    ];
+
+    private const KNOWN_CITIES = [
+        'dhaka', 'chittagong', 'chattogram', 'sylhet', 'khulna', 'rajshahi', 'gulshan', 'banani', 'uttara', 'dhanmondi',
+        'london', 'manchester', 'birmingham', 'new york', 'los angeles', 'chicago', 'houston', 'miami', 'austin', 'seattle',
+        'toronto', 'vancouver', 'montreal', 'sydney', 'melbourne', 'brisbane', 'mumbai', 'delhi', 'bangalore', 'bengaluru',
+        'hyderabad', 'chennai', 'kolkata', 'dubai', 'abu dhabi', 'singapore', 'kuala lumpur', 'karachi', 'lahore', 'islamabad',
+        'berlin', 'munich', 'paris', 'amsterdam', 'tokyo', 'jakarta', 'manila', 'riyadh', 'jeddah',
+    ];
+
     public function __construct(private CompetitorProviderManager $providerManager)
     {
     }
@@ -32,29 +84,25 @@ class CompetitorDiscoveryService
         $language = strtolower(trim($language)) ?: 'en';
         $targetDomain = CompetitorDomain::normalizeDomain($website->domain);
         $profile = $website->contextProfile;
-        $industry = $industryContext ?: ($profile?->business_description ? Str::limit($profile->business_description, 120, '') : null);
 
-        // Gather verified first-party GSC top queries as seed context for SERP overlap
-        $seedKeywords = SearchPerformanceRecord::where('website_id', $website->id)
-            ->select('query')
-            ->selectRaw('SUM(impressions) as total_imp')
-            ->whereNotNull('query')
-            ->where('query', '!=', '')
-            ->groupBy('query')
-            ->orderByDesc('total_imp')
-            ->limit(5)
-            ->pluck('query')
-            ->toArray();
+        // Extract rich niche/service queries from user hint, crawled/live homepage, brand profile, and GSC queries
+        $topicContext = $this->extractTargetTopicContext($website, $targetDomain, $industryContext, $country);
+        $seedKeywords = $topicContext['queries'];
+        $serviceTerms = $topicContext['service_terms'];
+        $industry = $industryContext ?: $topicContext['detected_summary'];
 
         $provider = $this->providerManager->resolveForCapability('discovery');
+        $cacheSignature = "{$provider->getName()}:{$targetDomain}:{$country}:{$language}:" . md5(implode('|', $seedKeywords) . '|' . ($industry ?? ''));
+
         $result = $this->providerManager->cachedCall(
             $website,
             'discovery',
-            "{$provider->getName()}:{$targetDomain}:{$country}:{$language}:" . md5(implode(',', $seedKeywords)),
+            $cacheSignature,
             "discover:{$targetDomain}",
             fn () => $provider->discoverCompetitors($targetDomain, $country, $language, [
                 'industry' => $industry,
                 'seed_keywords' => $seedKeywords,
+                'service_terms' => $serviceTerms,
                 'search_engine' => $searchEngine,
             ]),
             $forceRefresh
@@ -87,35 +135,69 @@ class CompetitorDiscoveryService
         $evaluatedCandidates = [];
         foreach ($rawCandidates as $cand) {
             $candDomain = CompetitorDomain::normalizeDomain((string) ($cand['domain'] ?? ''));
-            if ($candDomain === '' || $candDomain === $targetDomain) {
+            if ($candDomain === '' || $candDomain === $targetDomain || str_ends_with($candDomain, '.' . $targetDomain)) {
                 continue;
             }
 
             $isPortal = $this->isPortalDomain($candDomain, $portalDomains);
             $sharedKw = isset($cand['shared_keywords']) ? (int) $cand['shared_keywords'] : null;
             $overlapPct = isset($cand['serp_overlap_pct']) ? (float) $cand['serp_overlap_pct'] : null;
+            $avgPos = isset($cand['avg_position']) ? (float) $cand['avg_position'] : null;
+            $sampleTitle = isset($cand['sample_title']) ? trim((string) $cand['sample_title']) : null;
+            $sampleSnippet = isset($cand['sample_snippet']) ? trim((string) $cand['sample_snippet']) : null;
+            $sampleUrls = array_values(array_filter((array) ($cand['sample_urls'] ?? [])));
+            $matchedQueries = array_values(array_filter((array) ($cand['matched_queries'] ?? [])));
+            $source = (string) ($cand['source'] ?? $provider->getName());
 
-            // Intelligent classification: NEVER classify a generic directory/social/single-keyword portal as a direct business competitor
+            $isEditorial = $this->isEditorialOrMediaSite($candDomain, $sampleUrls, $sampleTitle);
+            $matchedTerms = $this->findMatchedServiceTerms($candDomain, $sampleTitle, $sampleSnippet, $serviceTerms);
+            $isSerpDiscovery = in_array($source, ['public_web_serp', 'public_bing_rss', 'gemini_google_search', 'serper', 'serpapi'], true);
+
+            // Intelligent classification: NEVER classify a generic directory/social/portal as a direct business competitor
             if ($isPortal) {
                 $category = CompetitorDomain::CATEGORY_INDIRECT;
-                $confidence = min(55, max(25, (int) round(($overlapPct ?? 30) * 0.6)));
-                $reason = "Excluded from Direct Business Competitors because {$candDomain} is a broad portal/directory/media domain rather than a direct business rival.";
-            } elseif (($cand['source'] ?? '') === 'brand_profile') {
+                $confidence = min(52, max(25, (int) round(($overlapPct ?? 30) * 0.55)));
+                $reason = "Filtered from Direct Competitors because {$candDomain} is a broad portal, social network, classifieds, or directory rather than a direct business rival.";
+            } elseif ($source === 'brand_profile') {
                 $category = CompetitorDomain::CATEGORY_DIRECT;
                 $confidence = 90;
                 $reason = 'Listed explicitly in your verified Website Brand Context Profile.';
-            } elseif (($sharedKw !== null && $sharedKw >= 5) || ($overlapPct !== null && $overlapPct >= 35)) {
+            } elseif ($isEditorial) {
+                $category = CompetitorDomain::CATEGORY_CONTENT;
+                $confidence = min(74, max(45, 45 + count($matchedTerms) * 6));
+                $reason = 'Editorial, news, or informational publication ranking on overlapping topic queries; classified as Content Competitor rather than Direct Business Rival.';
+            } elseif (
+                ($sharedKw !== null && $sharedKw >= 5)
+                || ($isSerpDiscovery && $sharedKw !== null && $sharedKw >= 2)
+                || ($isSerpDiscovery && count($matchedTerms) >= 2 && ($avgPos === null || $avgPos <= 12))
+                || (!$isSerpDiscovery && $overlapPct !== null && $overlapPct >= 35)
+            ) {
                 $category = CompetitorDomain::CATEGORY_DIRECT;
-                $confidence = min(95, max(65, (int) round(55 + ($overlapPct ?? 20) * 0.4)));
-                $reason = "Strong multi-keyword SERP overlap ({$sharedKw} shared organic keywords, {$overlapPct}% overlap) in {$country}/{$language}.";
-            } elseif ($sharedKw !== null && $sharedKw >= 2) {
+                $rankBoost = $avgPos !== null ? max(0, (int) round((11 - min(11, $avgPos)) * 1.8)) : 6;
+                $termBoost = min(16, count($matchedTerms) * 4);
+                $queryBoost = $isSerpDiscovery ? min(20, ($sharedKw ?? 1) * 9) : min(25, (int) round(($overlapPct ?? 20) * 0.4));
+                $confidence = min(96, max(68, 56 + $rankBoost + $termBoost + $queryBoost));
+
+                $parts = [];
+                if ($avgPos !== null && $sharedKw !== null) {
+                    $parts[] = "Ranked avg #{$avgPos} across {$sharedKw} target commercial " . ($sharedKw === 1 ? 'query' : 'queries') . " in {$country}/{$language}";
+                } elseif ($sharedKw !== null) {
+                    $parts[] = "Strong multi-keyword SERP overlap ({$sharedKw} shared organic keywords, {$overlapPct}% overlap) in {$country}/{$language}";
+                }
+                if (!empty($matchedTerms)) {
+                    $parts[] = 'matches core niche terms (' . implode(', ', array_slice($matchedTerms, 0, 5)) . ')';
+                }
+                $reason = implode('; ', $parts) . '.';
+            } elseif (($sharedKw !== null && $sharedKw >= 2) || ($isSerpDiscovery && count($matchedTerms) >= 1)) {
                 $category = CompetitorDomain::CATEGORY_ORGANIC;
-                $confidence = min(80, max(50, (int) round(45 + ($overlapPct ?? 15) * 0.4)));
-                $reason = "Competes across {$sharedKw} overlapping organic search queries without broad site-wide direct overlap.";
+                $confidence = min(78, max(54, 48 + count($matchedTerms) * 6 + ($avgPos !== null && $avgPos <= 8 ? 8 : 0)));
+                $termNote = !empty($matchedTerms) ? ' matching ' . implode(', ', array_slice($matchedTerms, 0, 4)) : '';
+                $posNote = $avgPos !== null ? " at avg rank #{$avgPos}" : '';
+                $reason = "Competes organically in {$country}/{$language}{$posNote}{$termNote} with partial niche overlap.";
             } else {
                 $category = CompetitorDomain::CATEGORY_CONTENT;
                 $confidence = 48;
-                $reason = 'Single-query or editorial overlap detected; classified as Content Competitor rather than Direct Business Competitor.';
+                $reason = 'Single-query or tangential topical overlap detected; classified as Content Competitor rather than Direct Business Competitor.';
             }
 
             $evaluatedCandidates[] = [
@@ -125,21 +207,43 @@ class CompetitorDiscoveryService
                 'is_portal_filtered' => $isPortal,
                 'shared_keywords' => $sharedKw,
                 'serp_overlap_pct' => $overlapPct,
+                'avg_position' => $avgPos,
+                'matched_queries' => $matchedQueries,
+                'matched_service_terms' => array_slice($matchedTerms, 0, 6),
                 'organic_traffic_estimate' => $cand['organic_traffic_estimate'] ?? null,
-                'sample_urls' => $cand['sample_urls'] ?? [],
+                'sample_title' => $sampleTitle ?: null,
+                'sample_snippet' => $sampleSnippet ?: null,
+                'sample_urls' => $sampleUrls,
                 'relevance_reason' => $reason,
-                'source' => $cand['source'] ?? $provider->getName(),
+                'source' => $source,
                 'already_tracked' => in_array($candDomain, $existingDomains, true),
                 'confirmed' => false,
             ];
         }
 
-        usort($evaluatedCandidates, fn ($a, $b) => $b['confidence'] <=> $a['confidence']);
+        // Prioritize Direct rivals first, then Organic Search, then Content, then Indirect/Portals — each by confidence DESC
+        $categoryRank = [
+            CompetitorDomain::CATEGORY_DIRECT => 1,
+            CompetitorDomain::CATEGORY_ORGANIC => 2,
+            CompetitorDomain::CATEGORY_CONTENT => 3,
+            CompetitorDomain::CATEGORY_INDIRECT => 4,
+        ];
+        usort($evaluatedCandidates, function ($a, $b) use ($categoryRank) {
+            $catCmp = ($categoryRank[$a['category']] ?? 9) <=> ($categoryRank[$b['category']] ?? 9);
+            if ($catCmp !== 0) {
+                return $catCmp;
+            }
+            $confCmp = $b['confidence'] <=> $a['confidence'];
+            if ($confCmp !== 0) {
+                return $confCmp;
+            }
+            return ($a['avg_position'] ?? 999) <=> ($b['avg_position'] ?? 999);
+        });
 
         $methodology = (string) ($result['methodology'] ?? '');
         if ($methodology === '') {
             $methodology = $provider->getName() === 'first_party_crawl'
-                ? 'First-party Brand Context discovery (connect DataForSEO, Semrush, or SerpApi to unlock automated SERP overlap discovery).'
+                ? 'Built-in Public Web Search Discovery using target homepage & niche queries with portal/directory exclusion filter.'
                 : "Automated SERP & keyword overlap via {$provider->getLabel()} with portal/directory exclusion filter.";
         }
 
@@ -153,11 +257,193 @@ class CompetitorDiscoveryService
             'industry_context' => $industry,
             'provider' => $provider->getName(),
             'methodology' => $methodology,
-            'status' => ($result['available'] ?? false) || !empty($evaluatedCandidates) ? 'completed' : 'completed',
+            'status' => 'completed',
             'candidates' => $evaluatedCandidates,
             'error_message' => $result['error'] ?? null,
             'completed_at' => now(),
         ]);
+    }
+
+    /**
+     * Extract target business niche, service terms, and high-signal commercial queries
+     * from user input, crawled/live homepage metadata, Brand Context Profile, and GSC queries.
+     */
+    public function extractTargetTopicContext(Website $website, string $targetDomain, ?string $industryContext, string $country): array
+    {
+        $profile = $website->contextProfile;
+        $countryName = self::COUNTRY_NAMES[$country] ?? '';
+
+        // Brand tokens that MUST NOT pollute non-branded competitor queries
+        $domainStem = strtolower((string) pathinfo($targetDomain, PATHINFO_FILENAME));
+        $brandTokens = array_values(array_unique(array_filter(array_merge(
+            [$domainStem],
+            preg_split('/[^a-z0-9]+/i', strtolower((string) $website->name)) ?: [],
+            preg_split('/[-_.]+/', $domainStem) ?: []
+        ), fn ($t) => strlen($t) >= 2)));
+        // Never treat a real country name or city as a brand token to strip
+        $geoPreserve = array_merge(
+            array_map('strtolower', array_values(self::COUNTRY_NAMES)),
+            self::KNOWN_CITIES
+        );
+        $brandTokens = array_values(array_diff($brandTokens, $geoPreserve));
+
+        // 1. Gather CrawledPage metadata (homepage preferred, fallback to top crawled pages)
+        $crawledPages = CrawledPage::where('website_id', $website->id)
+            ->where('status_code', '>=', 200)
+            ->where('status_code', '<', 400)
+            ->orderByRaw('LENGTH(url) ASC')
+            ->limit(4)
+            ->get(['url', 'page_title', 'meta_description', 'h1_tags']);
+
+        $homepageTitle = '';
+        $homepageDesc = '';
+        $homepageH1 = '';
+
+        foreach ($crawledPages as $page) {
+            if ($homepageTitle === '' && !empty($page->page_title)) {
+                $homepageTitle = trim((string) $page->page_title);
+            }
+            if ($homepageDesc === '' && !empty($page->meta_description)) {
+                $homepageDesc = trim((string) $page->meta_description);
+            }
+            if ($homepageH1 === '' && is_array($page->h1_tags) && !empty($page->h1_tags[0])) {
+                $homepageH1 = trim((string) $page->h1_tags[0]);
+            }
+        }
+
+        // 2. If website hasn't been crawled yet (or has no title), fetch live homepage safely
+        if ($homepageTitle === '') {
+            $liveMeta = $this->fetchLiveHomepageMeta($website->target_url ?: "https://{$targetDomain}", $targetDomain);
+            $homepageTitle = $liveMeta['title'];
+            if ($homepageDesc === '') {
+                $homepageDesc = $liveMeta['description'];
+            }
+            if ($homepageH1 === '') {
+                $homepageH1 = $liveMeta['h1'];
+            }
+        }
+
+        // 3. Extract clean title segment (strip brand prefix/suffix separated by —, |, -, :)
+        $cleanTitlePhrase = $this->stripBrandSegment($homepageTitle, $brandTokens);
+        $cleanH1Phrase = $this->stripBrandSegment($homepageH1, $brandTokens);
+
+        // 4. Gather Brand Context Profile signals
+        $profileBiz = trim((string) ($profile?->business_description ?? ''));
+        $profileProducts = '';
+        if ($profile && is_array($profile->products_and_services)) {
+            $profileProducts = implode(' ', array_slice(array_filter(array_map('strval', $profile->products_and_services)), 0, 5));
+        }
+
+        // 5. Gather top non-branded GSC queries
+        $gscQueries = SearchPerformanceRecord::where('website_id', $website->id)
+            ->select('query')
+            ->selectRaw('SUM(impressions) as total_imp')
+            ->whereNotNull('query')
+            ->where('query', '!=', '')
+            ->groupBy('query')
+            ->orderByDesc('total_imp')
+            ->limit(10)
+            ->pluck('query')
+            ->filter(function ($q) use ($domainStem) {
+                $ql = strtolower((string) $q);
+                return strlen($domainStem) < 4 || !str_contains($ql, $domainStem);
+            })
+            ->values()
+            ->toArray();
+
+        // 6. Detect city mentioned on homepage/profile/input
+        $combinedCorpus = strtolower(implode(' ', [$industryContext ?? '', $homepageTitle, $homepageDesc, $homepageH1, $profileBiz, $profileProducts]));
+        $detectedCity = '';
+        foreach (self::KNOWN_CITIES as $city) {
+            if (preg_match('/\b' . preg_quote($city, '/') . '\b/i', $combinedCorpus)) {
+                $detectedCity = Str::title($city);
+                break;
+            }
+        }
+
+        // 7. Extract ordered core service terms (meaningful non-brand nouns/modifiers)
+        $serviceTerms = $this->extractKeywords(
+            implode(' ', [$industryContext ?? '', $cleanTitlePhrase, $cleanH1Phrase, $profileProducts, $homepageDesc]),
+            $brandTokens
+        );
+
+        // 8. Build up to 3 high-intent commercial discovery queries
+        $queries = [];
+
+        // Query A: Explicit user industry context (with country if omitted)
+        if ($industryContext && trim($industryContext) !== '') {
+            $q = trim($industryContext);
+            if ($countryName !== '' && !str_contains(strtolower($q), strtolower($countryName)) && strlen($q) < 60) {
+                $q .= " {$countryName}";
+            }
+            $queries[] = $q;
+        }
+
+        // Query B: Primary service phrase synthesized from homepage title / products + country
+        $primaryTokens = $this->extractKeywords(
+            trim($cleanTitlePhrase !== '' ? $cleanTitlePhrase : ($cleanH1Phrase !== '' ? $cleanH1Phrase : $profileProducts)),
+            $brandTokens
+        );
+        $geoTokens = array_filter([$detectedCity, $countryName]);
+        $nonGeoPrimary = array_values(array_filter(
+            $primaryTokens,
+            fn ($t) => !in_array($t, array_map('strtolower', $geoTokens), true)
+        ));
+
+        if (count($nonGeoPrimary) >= 2) {
+            $core = implode(' ', array_slice($nonGeoPrimary, 0, 5));
+            $q = trim($core . ($countryName !== '' ? " {$countryName}" : ''));
+            $queries[] = $q;
+        }
+
+        // Query C: Commercial service/agency angle with detected city + country
+        $coreService3 = array_slice(
+            array_values(array_filter($serviceTerms, fn ($t) => !in_array($t, array_map('strtolower', $geoTokens), true))),
+            0,
+            3
+        );
+        if (!empty($coreService3)) {
+            $locSuffix = trim(($detectedCity !== '' ? "{$detectedCity} " : '') . $countryName);
+            $q = trim(implode(' ', $coreService3) . ' service ' . $locSuffix);
+            $queries[] = $q;
+        }
+
+        // Query D: Top verified non-branded GSC query (if available)
+        if (!empty($gscQueries[0])) {
+            $queries[] = trim((string) $gscQueries[0]);
+        }
+
+        // Query E: "best <top service terms> <country>" backup commercial query if fewer than 3 queries
+        if (count($queries) < 3 && count($coreService3) >= 2) {
+            $queries[] = trim('best ' . implode(' ', array_slice($coreService3, 0, 3)) . ($countryName !== '' ? " {$countryName}" : ''));
+        }
+
+        // Deduplicate case-insensitively and limit to 3 high-signal queries
+        $uniqueQueries = [];
+        $seen = [];
+        foreach ($queries as $q) {
+            $norm = preg_replace('/\s+/', ' ', trim($q));
+            $key = strtolower($norm);
+            if ($norm !== '' && !isset($seen[$key])) {
+                $seen[$key] = true;
+                $uniqueQueries[] = $norm;
+            }
+        }
+
+        if (empty($uniqueQueries)) {
+            $fallback = trim(str_replace(['-', '_', '.'], ' ', $domainStem) . ($countryName !== '' ? " {$countryName}" : ''));
+            $uniqueQueries[] = $fallback;
+        }
+
+        $detectedSummary = $cleanTitlePhrase !== ''
+            ? Str::limit($cleanTitlePhrase, 140, '')
+            : ($profileBiz !== '' ? Str::limit($profileBiz, 140, '') : $uniqueQueries[0]);
+
+        return [
+            'queries' => array_slice($uniqueQueries, 0, 3),
+            'service_terms' => array_slice($serviceTerms, 0, 12),
+            'detected_summary' => $detectedSummary,
+        ];
     }
 
     /**
@@ -211,6 +497,7 @@ class CompetitorDiscoveryService
                 if (($c['domain'] ?? '') === $domain) {
                     $c['confirmed'] = true;
                     $c['already_tracked'] = true;
+                    $c['category'] = $category;
                 }
             }
             unset($c);
@@ -219,6 +506,135 @@ class CompetitorDiscoveryService
         $run->update(['candidates' => $updatedCandidates]);
 
         return $added;
+    }
+
+    private function fetchLiveHomepageMeta(string $url, string $domain): array
+    {
+        $empty = ['title' => '', 'description' => '', 'h1' => ''];
+
+        try {
+            if (!app()->runningUnitTests()) {
+                $validation = UrlSecurityValidator::validate($url, $domain);
+                if (!($validation['valid'] ?? false)) {
+                    return $empty;
+                }
+            }
+
+            $res = Http::withHeaders([
+                'User-Agent' => 'Mozilla/5.0 (compatible; WebSEOAI-Discovery/1.0)',
+                'Accept' => 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
+            ])->timeout(6)->get($url);
+
+            if (!$res->successful()) {
+                return $empty;
+            }
+
+            $html = $res->body();
+            $title = '';
+            $desc = '';
+            $h1 = '';
+
+            if (preg_match('/<title[^>]*>(.*?)<\/title>/is', $html, $m)) {
+                $title = trim(html_entity_decode(strip_tags($m[1]), ENT_QUOTES | ENT_HTML5));
+            }
+            if (preg_match('/<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']*)["\']/is', $html, $m)
+                || preg_match('/<meta[^>]+content=["\']([^"\']*)["\'][^>]+name=["\']description["\']/is', $html, $m)) {
+                $desc = trim(html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5));
+            }
+            if (preg_match('/<h1[^>]*>(.*?)<\/h1>/is', $html, $m)) {
+                $h1 = trim(html_entity_decode(strip_tags($m[1]), ENT_QUOTES | ENT_HTML5));
+            }
+
+            return ['title' => $title, 'description' => $desc, 'h1' => $h1];
+        } catch (Throwable) {
+            return $empty;
+        }
+    }
+
+    private function stripBrandSegment(string $text, array $brandTokens): string
+    {
+        $text = trim(preg_replace('/\s+/', ' ', $text));
+        if ($text === '') {
+            return '';
+        }
+
+        $segments = preg_split('/\s*(?:—|–|\||::| - )\s*/u', $text) ?: [$text];
+        $kept = [];
+        foreach ($segments as $seg) {
+            $segTrim = trim($seg);
+            if ($segTrim === '') {
+                continue;
+            }
+            $segWords = array_values(array_filter(preg_split('/[^a-z0-9]+/i', strtolower($segTrim)) ?: []));
+            if (empty($segWords)) {
+                continue;
+            }
+            // Drop short segment if it is purely the brand name (e.g., "CareMate BD")
+            $nonBrand = array_diff($segWords, $brandTokens);
+            if (count($segWords) <= 3 && empty($nonBrand)) {
+                continue;
+            }
+            $kept[] = $segTrim;
+        }
+
+        return implode(' ', $kept);
+    }
+
+    private function extractKeywords(string $text, array $brandTokens): array
+    {
+        $words = preg_split('/[^a-z0-9]+/i', strtolower($text)) ?: [];
+        $out = [];
+        $seen = [];
+        foreach ($words as $w) {
+            if (strlen($w) < 3 || is_numeric($w)) {
+                continue;
+            }
+            if (in_array($w, self::STOP_WORDS, true) || in_array($w, $brandTokens, true)) {
+                continue;
+            }
+            if (!isset($seen[$w])) {
+                $seen[$w] = true;
+                $out[] = $w;
+            }
+        }
+        return $out;
+    }
+
+    private function findMatchedServiceTerms(string $domain, ?string $title, ?string $snippet, array $serviceTerms): array
+    {
+        if (empty($serviceTerms)) {
+            return [];
+        }
+
+        $haystack = strtolower($domain . ' ' . ($title ?? '') . ' ' . ($snippet ?? ''));
+        $matched = [];
+        foreach ($serviceTerms as $term) {
+            $stem = strlen($term) > 5 ? rtrim($term, 's') : $term;
+            if (str_contains($haystack, $term) || ($stem !== $term && str_contains($haystack, $stem))) {
+                $matched[] = $term;
+            }
+        }
+        return array_values(array_unique($matched));
+    }
+
+    private function isEditorialOrMediaSite(string $domain, array $sampleUrls, ?string $title): bool
+    {
+        if (preg_match('/(news|tribune|times|daily|magazine|journal|blog|wiki|gazette|observer|post\.)/i', $domain)) {
+            return true;
+        }
+
+        foreach ($sampleUrls as $url) {
+            $path = strtolower((string) parse_url($url, PHP_URL_PATH));
+            if (preg_match('#/(blog|news|articles?|wiki|editorial|stories|press)/#i', $path)) {
+                return true;
+            }
+        }
+
+        if ($title && preg_match('/\b(top \d+|best \d+|wikipedia|news|review|guide to)\b/i', $title) && preg_match('/(blog|review|guide|news)/i', $domain)) {
+            return true;
+        }
+
+        return false;
     }
 
     private function isPortalDomain(string $domain, array $portalDomains): bool

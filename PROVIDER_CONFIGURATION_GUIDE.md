@@ -24,6 +24,12 @@ DATAFORSEO_BASE_URL=https://api.dataforseo.com/v3
 
 You may connect any combination of the following providers; `CompetitorProviderManager` automatically selects the best configured provider per capability:
 
+### Serper.dev (Fastest Free Google SERP & Competitor Discovery — 2,500 Free Queries)
+```env
+SERPER_API_KEY=your_serper_api_key
+```
+Sign up free at https://serper.dev/ (no credit card required for the first 2,500 Google searches). Powers both **Intelligent Competitor Discovery** and **SERP Analysis** with real Google organic rankings, People Also Ask, and SERP features.
+
 ### SerpApi (Google Organic SERP & SERP Discovery)
 ```env
 SERPAPI_KEY=your_serpapi_private_key

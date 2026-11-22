@@ -925,7 +925,12 @@ export interface CompetitorDiscoveryCandidate {
   is_portal_filtered?: boolean;
   shared_keywords: number | null;
   serp_overlap_pct: number | null;
+  avg_position?: number | null;
+  matched_queries?: string[];
+  matched_service_terms?: string[];
   organic_traffic_estimate?: number | null;
+  sample_title?: string | null;
+  sample_snippet?: string | null;
   sample_urls?: string[];
   relevance_reason: string;
   source: string;

@@ -528,4 +528,73 @@ class CompetitorAnalysisTest extends TestCase
             ->assertJsonPath('data.frequency', 'daily')
             ->assertJsonPath('data.min_position_delta', 5);
     }
+
+    public function test_zero_api_key_public_web_discovery_extracts_target_niche_and_finds_detailed_competitors(): void
+    {
+        config([
+            'competitors.providers.dataforseo.login' => '',
+            'competitors.providers.dataforseo.password' => '',
+            'competitors.providers.semrush.api_key' => '',
+            'competitors.providers.ahrefs.api_key' => '',
+            'competitors.providers.serpapi.api_key' => '',
+            'competitors.providers.serper.api_key' => '',
+            'ai.gemini.api_key' => '',
+        ]);
+
+        $ddgHtml = <<<'HTML'
+        <html><body>
+          <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fcaregiveragencybd.com%2Fservices">Caregiver Agency BD | Elderly &amp; Nursing Care in Bangladesh</a>
+          <a class="result__snippet">Trusted home caregivers for elderly patients and child nursing care in Dhaka and across Bangladesh.</a>
+          <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fclaracareservices.com%2Fhome-nursing">Clara Care Services | Home Nursing Care Bangladesh</a>
+          <a class="result__snippet">24/7 home nursing and elderly caregiver service in Dhaka Bangladesh.</a>
+          <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.facebook.com%2Fcaregiversbd">Caregivers BD - Facebook</a>
+          <a class="result__snippet">Facebook community page for caregivers in Bangladesh.</a>
+        </body></html>
+        HTML;
+
+        Http::fake([
+            'https://carematebd.com*' => Http::response(
+                '<html><head><title>CareMate BD — Trusted Caregivers for Elderly, Child, &amp; Nursing Care in Bangladesh</title>'
+                . '<meta name="description" content="Find background-verified caregivers in Dhaka and across Bangladesh."></head>'
+                . '<body><h1>Trusted Home Caregivers in Dhaka</h1></body></html>',
+                200
+            ),
+            'https://html.duckduckgo.com/html/*' => Http::response($ddgHtml, 200),
+        ]);
+
+        $res = $this->actingAs($this->seoManager)
+            ->withHeaders($this->authHeaders($this->seoManager, $this->org))
+            ->postJson("/api/v1/websites/{$this->website->id}/competitors/discover", [
+                'country' => 'BD',
+                'language' => 'en',
+                'force_refresh' => true,
+            ]);
+
+        $res->assertStatus(201);
+        $candidates = collect($res->json('data.candidates'));
+
+        // Must discover real direct business competitors with rich metadata
+        $rival1 = $candidates->firstWhere('domain', 'caregiveragencybd.com');
+        $this->assertNotNull($rival1);
+        $this->assertEquals('direct', $rival1['category']);
+        $this->assertFalse($rival1['is_portal_filtered']);
+        $this->assertNotEmpty($rival1['matched_queries']);
+        $this->assertNotEmpty($rival1['sample_title']);
+        $this->assertNotEmpty($rival1['sample_snippet']);
+        $this->assertNotEmpty($rival1['sample_urls']);
+        $this->assertNotNull($rival1['avg_position']);
+
+        $rival2 = $candidates->firstWhere('domain', 'claracareservices.com');
+        $this->assertNotNull($rival2);
+        $this->assertEquals('direct', $rival2['category']);
+
+        // Facebook must be filtered out as portal/indirect
+        $fb = $candidates->firstWhere('domain', 'facebook.com');
+        $this->assertNotNull($fb);
+        $this->assertEquals('indirect', $fb['category']);
+        $this->assertTrue($fb['is_portal_filtered']);
+
+        // Direct rivals must be sorted ahead of filtered portals
+        $this->assertEquals('direct', $candidates->first()['category']);
+    }
 }
