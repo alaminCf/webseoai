@@ -294,10 +294,11 @@ class WordPressAdapter implements CmsAdapterInterface
             'User-Agent' => 'WebSEOAI-WordPressAdapter/1.0',
         ]);
 
-        if (!empty($this->credentials['username']) && !empty($this->credentials['application_password'])) {
+        $appPassword = $this->credentials['application_password'] ?? $this->credentials['app_password'] ?? null;
+        if (!empty($this->credentials['username']) && !empty($appPassword)) {
             $client = $client->withBasicAuth(
                 $this->credentials['username'],
-                $this->credentials['application_password']
+                $appPassword
             );
         } elseif (!empty($this->credentials['token'])) {
             $client = $client->withToken($this->credentials['token']);
@@ -308,12 +309,41 @@ class WordPressAdapter implements CmsAdapterInterface
 
     private function resolvePageId(string $slug): int
     {
-        $response = $this->httpClient()->get("{$this->baseUrl}/wp-json/wp/v2/pages?slug={$slug}");
-        $data = $response->json();
-        if (empty($data[0]['id'])) {
-            throw new Exception("Could not resolve WordPress page slug [{$slug}] to an ID.");
+        $cleanSlug = trim($slug);
+        if (str_starts_with($cleanSlug, 'http://') || str_starts_with($cleanSlug, 'https://')) {
+            $path = trim((string) parse_url($cleanSlug, PHP_URL_PATH), '/');
+            if ($path === '') {
+                $cleanSlug = '';
+            } else {
+                $parts = explode('/', $path);
+                $cleanSlug = end($parts) ?: '';
+            }
+        } else {
+            $cleanSlug = trim($cleanSlug, '/');
         }
-        return (int) $data[0]['id'];
+
+        if ($cleanSlug !== '') {
+            $pageRes = $this->httpClient()->get("{$this->baseUrl}/wp-json/wp/v2/pages?slug=" . urlencode($cleanSlug));
+            $pageData = $pageRes->json();
+            if (!empty($pageData[0]['id'])) {
+                return (int) $pageData[0]['id'];
+            }
+
+            $postRes = $this->httpClient()->get("{$this->baseUrl}/wp-json/wp/v2/posts?slug=" . urlencode($cleanSlug));
+            $postData = $postRes->json();
+            if (!empty($postData[0]['id'])) {
+                return (int) $postData[0]['id'];
+            }
+        } else {
+            // Homepage fallback: first published page ordered by menu_order
+            $homeRes = $this->httpClient()->get("{$this->baseUrl}/wp-json/wp/v2/pages?per_page=1&orderby=menu_order&order=asc");
+            $homeData = $homeRes->json();
+            if (!empty($homeData[0]['id'])) {
+                return (int) $homeData[0]['id'];
+            }
+        }
+
+        throw new Exception("Could not resolve WordPress page or post slug [{$slug}] to an ID.");
     }
 
     private function normalizeWpPage(array $raw): array

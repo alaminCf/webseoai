@@ -48,11 +48,23 @@ class AiRecommendationController extends Controller
         $recommendations = $query->orderBy('priority_score', 'desc')
             ->paginate($request->integer('per_page', 25));
 
+        $allForSite = AiRecommendation::where('website_id', $website->id);
+        $summary = [
+            'total' => (clone $allForSite)->count(),
+            'proposed' => (clone $allForSite)->where('status', AiRecommendation::STATUS_PROPOSED)->count(),
+            'accepted' => (clone $allForSite)->where('status', AiRecommendation::STATUS_ACCEPTED)->count(),
+            'in_progress' => (clone $allForSite)->where('status', AiRecommendation::STATUS_IN_PROGRESS)->count(),
+            'applied' => (clone $allForSite)->where('status', AiRecommendation::STATUS_APPLIED)->count(),
+            'dismissed' => (clone $allForSite)->where('status', AiRecommendation::STATUS_DISMISSED)->count(),
+            'quick_wins' => (clone $allForSite)->where('impact_score', '>=', 7)->where('effort', 'low')->where('status', '!=', AiRecommendation::STATUS_DISMISSED)->count(),
+        ];
+
         return $this->success($recommendations->items(), [
             'current_page' => $recommendations->currentPage(),
             'per_page' => $recommendations->perPage(),
             'total' => $recommendations->total(),
             'last_page' => $recommendations->lastPage(),
+            'summary' => $summary,
             'scoring_formula' => 'Score = (Impact * Confidence) / (Effort + Risk * 0.5), normalized 0-100',
         ]);
     }
@@ -76,7 +88,7 @@ class AiRecommendationController extends Controller
             return $this->error('Website not found.', 'WEBSITE_NOT_FOUND', null, 404);
         }
 
-        $engine = new RecommendationEngine($website);
+        $engine = new RecommendationEngine($website, null, $request->user()?->id);
         $generated = $engine->generate();
 
         AuditLog::record(

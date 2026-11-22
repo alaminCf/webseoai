@@ -180,9 +180,10 @@ class AiStrategistAndContentStudioTest extends TestCase
         $res->assertStatus(200);
         $this->assertGreaterThan(0, $res->json('data.count'));
 
-        // 2. Verify all 10 mandatory fields are present
+        // 2. Verify all 10 mandatory fields are present AND grounded in real website URL (never fake example.com)
         $firstItem = $res->json('data.items.0');
-        $this->assertNotEmpty($firstItem['affected_url']);
+        $this->assertEquals('https://cloudsaas.io/pricing-v1', $firstItem['affected_url']);
+        $this->assertStringNotContainsString('example.com', $firstItem['affected_url']);
         $this->assertNotEmpty($firstItem['recommended_action']);
         $this->assertNotEmpty($firstItem['reasoning_summary']);
         $this->assertNotEmpty($firstItem['expected_benefit']);
@@ -202,14 +203,26 @@ class AiStrategistAndContentStudioTest extends TestCase
         $expectedPriority = AiRecommendation::calculatePriority($impact, $confidence, $effort, $risk);
         $this->assertEquals($expectedPriority, $firstItem['priority_score']);
 
-        // 4. Update status transition to 'accepted'
-        $recId = $firstItem['id'];
+        // 4. Re-generating does not duplicate proposed items
+        $regenRes = $this->actingAs($this->seoManager)->withHeaders(['X-Organization-Id' => $this->organization->id])
+            ->postJson("/api/v1/websites/{$this->website->id}/recommendations/generate");
+        $regenRes->assertStatus(200);
+        $freshId = $regenRes->json('data.items.0.id');
+        $this->assertEquals(1, AiRecommendation::where('website_id', $this->website->id)->count());
+
+        // 5. Update status transition to 'accepted' & verify summary meta counts
         $updateRes = $this->actingAs($this->editor)->withHeaders(['X-Organization-Id' => $this->organization->id])
-            ->patchJson("/api/v1/recommendations/{$recId}/status", [
+            ->patchJson("/api/v1/recommendations/{$freshId}/status", [
                 'status' => 'accepted',
             ]);
         $updateRes->assertStatus(200);
         $this->assertEquals('accepted', $updateRes->json('data.status'));
+
+        $listRes = $this->actingAs($this->seoManager)->withHeaders(['X-Organization-Id' => $this->organization->id])
+            ->getJson("/api/v1/websites/{$this->website->id}/recommendations");
+        $listRes->assertStatus(200)
+            ->assertJsonPath('meta.summary.accepted', 1)
+            ->assertJsonPath('meta.summary.total', 1);
     }
 
     public function test_content_studio_brief_outline_and_title_meta_generation(): void

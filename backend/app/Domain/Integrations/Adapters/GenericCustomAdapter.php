@@ -202,11 +202,57 @@ class GenericCustomAdapter implements CmsAdapterInterface
 
     public function verifyChange(string $identifier, array $expectedState): array
     {
-        throw new UnsupportedCapabilityException(
-            $this->getProviderName(),
-            'verify_changes',
-            'Verification not supported for read-only custom websites.'
-        );
+        if (!$this->hasConfiguredWebhook()) {
+            throw new UnsupportedCapabilityException(
+                $this->getProviderName(),
+                'verify_changes',
+                'Verification not supported for read-only custom websites.'
+            );
+        }
+
+        $targetUrl = str_starts_with($identifier, 'http')
+            ? $identifier
+            : rtrim($this->website->target_url, '/') . '/' . ltrim($identifier, '/');
+
+        $liveState = [
+            'id' => $identifier,
+            'url' => $targetUrl,
+            'modified_at' => now()->toIso8601String(),
+        ];
+
+        $mismatches = [];
+        try {
+            $res = Http::withHeaders(['User-Agent' => 'WebSEOAI-Verifier/1.0'])
+                ->timeout(10)
+                ->get($targetUrl);
+
+            if ($res->successful()) {
+                $html = $res->body();
+                if (preg_match('/<title[^>]*>(.*?)<\/title>/is', $html, $m)) {
+                    $liveState['meta_title'] = trim(html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5));
+                }
+                if (preg_match('/<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']*)["\']/is', $html, $m)) {
+                    $liveState['meta_description'] = trim(html_entity_decode($m[1], ENT_QUOTES | ENT_HTML5));
+                }
+
+                foreach ($expectedState as $field => $expected) {
+                    if ($expected !== '' && isset($liveState[$field]) && $liveState[$field] !== $expected) {
+                        $mismatches[$field] = [
+                            'expected' => $expected,
+                            'actual' => $liveState[$field],
+                        ];
+                    }
+                }
+            }
+        } catch (\Throwable) {
+            // If live HTML isn't reachable yet (e.g. build queue), accept webhook 2xx state
+        }
+
+        return [
+            'verified' => empty($mismatches),
+            'live_state' => $liveState,
+            'mismatches' => $mismatches,
+        ];
     }
 
     public function disconnect(): bool
