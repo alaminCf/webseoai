@@ -161,48 +161,53 @@ class LiveTrafficController extends Controller
             $includeTest
         );
 
-        // Build GA4 integration status metadata
+        // Build GA4 integration status metadata (including exact Admin/Data API diagnostics!)
         $ga4Integration = $website->ga4Integration;
         $ga4Connected = $ga4Integration && $ga4Integration->status === WebsiteIntegration::STATUS_CONNECTED;
         $ga4Meta = is_array($ga4Integration?->metadata) ? $ga4Integration->metadata : [];
+        $gscIntegration = $website->gscIntegration;
+        $gscConnected = $gscIntegration && $gscIntegration->status === WebsiteIntegration::STATUS_CONNECTED;
+        $gscCreds = $gscConnected ? ($gscIntegration->getDecryptedCredentials() ?? []) : [];
+        $gscHasAnalyticsScope = str_contains((string) ($gscCreds['scope'] ?? ''), 'analytics.readonly');
+
         $ga4Status = [
             'connected' => $ga4Connected,
             'selected_property_id' => $ga4Meta['selected_property_id'] ?? null,
             'selected_property_name' => $ga4Meta['selected_property_name'] ?? null,
             'properties' => $ga4Meta['properties'] ?? [],
+            'has_analytics_scope' => $ga4Meta['has_analytics_scope'] ?? true,
+            'admin_api_error' => $ga4Meta['admin_api_error'] ?? null,
+            'admin_api_enable_url' => $ga4Meta['admin_api_enable_url'] ?? null,
+            'gsc_connected' => $gscConnected,
+            'gsc_has_analytics_scope' => $gscHasAnalyticsScope,
             'last_synced_at' => $ga4Integration?->last_synced_at?->toIso8601String(),
             'last_error' => $ga4Integration?->last_error,
             'oauth_mode' => $this->ga4Service->isLiveConfigured() ? 'live' : 'sandbox',
         ];
 
         $ga4Error = null;
-        $shouldUseGa4 = $ga4Connected && !empty($ga4Status['selected_property_id']) && (
-            $source === 'ga4'
-            || ($source === 'auto' && !($trackerData['tracker']['has_real_events'] ?? false))
-            || $source === 'auto'
-        );
+        $ga4EnableUrl = $ga4Status['admin_api_enable_url'];
 
-        // If user explicitly wants tracker, skip GA4 fetch
-        if ($source === 'tracker') {
-            $shouldUseGa4 = false;
-        }
-
-        if ($shouldUseGa4 && $ga4Integration) {
+        // If GA4 is connected and user isn't explicitly forcing 1st-party script, ALWAYS try GA4 first
+        if ($ga4Connected && $source !== 'tracker' && $ga4Integration) {
             $ga4Res = $this->ga4Service->getRealtimeDashboard($website, $ga4Integration, $range, $country);
             if ($ga4Res['available'] ?? false) {
                 $ga4Res['tracker'] = $trackerData['tracker'];
                 $ga4Res['ga4'] = $ga4Status;
                 $ga4Res['ga4_error'] = null;
+                $ga4Res['ga4_enable_url'] = null;
                 $ga4Res['include_test'] = $includeTest;
                 $ga4Res['generated_at'] = now()->toIso8601String();
                 return $this->success($ga4Res);
             }
             $ga4Error = $ga4Res['error'] ?? 'GA4 query failed.';
+            $ga4EnableUrl = $ga4Res['enable_url'] ?? $ga4EnableUrl;
             $ga4Status['last_error'] = $ga4Error;
         }
 
         $trackerData['ga4'] = $ga4Status;
         $trackerData['ga4_error'] = $ga4Error;
+        $trackerData['ga4_enable_url'] = $ga4EnableUrl;
 
         return $this->success($trackerData);
     }
@@ -241,46 +246,62 @@ class LiveTrafficController extends Controller
     }
 
     /**
-     * Authenticated: Delete synthetic test visits so analytics stay 100% pure real traffic.
+     * Authenticated: Delete synthetic test visits (or reset all 1st-party tracker hits if ?all=1).
      */
     public function clearTestEvents(Request $request, Website $website): JsonResponse
     {
         $this->authorizeWebsite($request, $website);
 
-        $deleted = WebsiteTrafficEvent::where('website_id', $website->id)
-            ->where('is_test', true)
-            ->delete();
+        $query = WebsiteTrafficEvent::where('website_id', $website->id);
+        if (!$request->boolean('all', false)) {
+            $query->where('is_test', true);
+        }
+        $deleted = $query->delete();
 
         return $this->success([
             'deleted_count' => $deleted,
-            'message' => "Cleared {$deleted} test visit(s).",
+            'message' => "Cleared {$deleted} visit(s).",
         ]);
     }
 
     /**
-     * Authenticated: Get Google Analytics 4 (GA4) OAuth authorization URL (or reuse existing Google token if scope granted).
+     * Authenticated: 1-Click Connect Google Analytics 4.
+     * Automatically reuses an already-authorized Google OAuth token (from this website's GSC
+     * or any website in the same organization) if analytics.readonly scope was granted;
+     * otherwise returns a 1-click Google OAuth URL requesting BOTH GSC + GA4 scopes.
      */
     public function connectGa4(Request $request, Website $website): JsonResponse
     {
         $this->authorizeWebsite($request, $website);
+        $forceOauth = $request->boolean('force_oauth', false);
 
-        // If the website's existing GSC token already includes analytics.readonly scope, reuse it immediately!
-        $gsc = $website->gscIntegration;
-        if ($gsc && $gsc->status === WebsiteIntegration::STATUS_CONNECTED) {
-            $creds = $gsc->getDecryptedCredentials() ?? [];
-            $scope = (string) ($creds['scope'] ?? '');
-            if (str_contains($scope, 'analytics.readonly') && empty($creds['is_sandbox'])) {
-                $ga4 = $this->ga4Service->storeFromTokens($website, $creds);
-                return $this->success([
-                    'reused_google_oauth' => true,
-                    'authorization_url' => null,
-                    'ga4' => [
-                        'connected' => true,
-                        'selected_property_id' => $ga4->metadata['selected_property_id'] ?? null,
-                        'selected_property_name' => $ga4->metadata['selected_property_name'] ?? null,
-                        'properties' => $ga4->metadata['properties'] ?? [],
-                    ],
-                ]);
+        if (!$forceOauth) {
+            // 1. Check this website's GSC token, then any live GA4/GSC token in the same organization
+            $candidateIntegrations = WebsiteIntegration::where('organization_id', $website->organization_id)
+                ->whereIn('provider', [WebsiteIntegration::PROVIDER_GA4, WebsiteIntegration::PROVIDER_GSC])
+                ->where('status', WebsiteIntegration::STATUS_CONNECTED)
+                ->orderByRaw('CASE WHEN website_id = ? THEN 0 ELSE 1 END', [$website->id])
+                ->orderByDesc('updated_at')
+                ->get();
+
+            foreach ($candidateIntegrations as $candidate) {
+                $creds = $candidate->getDecryptedCredentials() ?? [];
+                $scope = (string) ($creds['scope'] ?? '');
+                if (!empty($creds['access_token']) && empty($creds['is_sandbox']) && str_contains($scope, 'analytics.readonly')) {
+                    $ga4 = $this->ga4Service->storeFromTokens($website, $creds);
+                    return $this->success([
+                        'reused_google_oauth' => true,
+                        'authorization_url' => null,
+                        'ga4' => [
+                            'connected' => true,
+                            'selected_property_id' => $ga4->metadata['selected_property_id'] ?? null,
+                            'selected_property_name' => $ga4->metadata['selected_property_name'] ?? null,
+                            'properties' => $ga4->metadata['properties'] ?? [],
+                            'admin_api_error' => $ga4->metadata['admin_api_error'] ?? null,
+                            'admin_api_enable_url' => $ga4->metadata['admin_api_enable_url'] ?? null,
+                        ],
+                    ]);
+                }
             }
         }
 
@@ -291,6 +312,23 @@ class LiveTrafficController extends Controller
             'authorization_url' => $authUrl,
             'oauth_mode' => $this->ga4Service->isLiveConfigured() ? 'live' : 'sandbox',
         ]);
+    }
+
+    /**
+     * Authenticated: Re-scan GA4 properties on the already-connected Google account (no re-OAuth needed).
+     */
+    public function refreshGa4Properties(Request $request, Website $website): JsonResponse
+    {
+        $this->authorizeWebsite($request, $website);
+
+        $ga4 = $website->ga4Integration;
+        if (!$ga4 || $ga4->status !== WebsiteIntegration::STATUS_CONNECTED) {
+            return $this->error('Google Analytics 4 is not connected yet.', 'GA4_NOT_CONNECTED', null, 400);
+        }
+
+        $result = $this->ga4Service->refreshProperties($website, $ga4);
+
+        return $this->success($result);
     }
 
     /**

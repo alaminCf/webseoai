@@ -36,7 +36,7 @@ class GoogleAnalyticsService
     }
 
     /**
-     * Generate Google OAuth 2.0 URL requesting GA4 analytics.readonly (plus webmasters.readonly).
+     * Generate Google OAuth 2.0 URL requesting BOTH GA4 analytics.readonly AND GSC webmasters.readonly.
      * Reuses the already-whitelisted Google Search Console OAuth callback URI with intent=ga4 in state.
      */
     public function getAuthorizationUrl(Website $website, int $userId): string
@@ -72,13 +72,30 @@ class GoogleAnalyticsService
     }
 
     /**
-     * Store GA4 integration from a freshly obtained Google OAuth token set.
+     * Store GA4 integration from a freshly obtained or reused Google OAuth token set.
+     * Never silently swallows Admin API errors — records exact diagnostics & enable URLs.
      */
     public function storeFromTokens(Website $website, array $credentials): WebsiteIntegration
     {
         $accessToken = (string) ($credentials['access_token'] ?? '');
-        $properties = $accessToken !== '' ? $this->fetchGa4Properties($accessToken) : [];
+        $scopeStr = (string) ($credentials['scope'] ?? '');
+        $hasAnalyticsScope = $scopeStr === '' || str_contains($scopeStr, 'analytics.readonly');
+
+        $fetchResult = $accessToken !== ''
+            ? $this->fetchGa4Properties($accessToken)
+            : ['properties' => [], 'error' => 'Missing Google OAuth access token.', 'enable_url' => null];
+
+        $properties = $fetchResult['properties'];
         $selected = $this->matchBestProperty($website, $properties);
+
+        // Preserve any previously manually-selected property ID if Admin API is disabled
+        $existing = WebsiteIntegration::where('website_id', $website->id)
+            ->where('provider', WebsiteIntegration::PROVIDER_GA4)
+            ->first();
+        $existingMeta = is_array($existing?->metadata) ? $existing->metadata : [];
+
+        $selectedId = $selected['property_id'] ?? ($existingMeta['selected_property_id'] ?? null);
+        $selectedName = $selected['display_name'] ?? ($existingMeta['selected_property_name'] ?? ($selectedId ? "Property {$selectedId}" : null));
 
         return WebsiteIntegration::updateOrCreate(
             [
@@ -89,16 +106,65 @@ class GoogleAnalyticsService
                 'organization_id' => $website->organization_id,
                 'encrypted_credentials' => $credentials,
                 'status' => WebsiteIntegration::STATUS_CONNECTED,
-                'last_error' => null,
+                'last_error' => $fetchResult['error'],
                 'last_synced_at' => now(),
                 'metadata' => [
                     'properties' => $properties,
-                    'selected_property_id' => $selected['property_id'] ?? null,
-                    'selected_property_name' => $selected['display_name'] ?? null,
+                    'selected_property_id' => $selectedId,
+                    'selected_property_name' => $selectedName,
+                    'granted_scope' => $scopeStr,
+                    'has_analytics_scope' => $hasAnalyticsScope,
+                    'admin_api_error' => $fetchResult['error'],
+                    'admin_api_enable_url' => $fetchResult['enable_url'],
                     'is_sandbox' => (bool) ($credentials['is_sandbox'] ?? false),
                 ],
             ]
         );
+    }
+
+    /**
+     * Re-fetch GA4 properties using the already-connected Google token (e.g. right after enabling Analytics Admin API).
+     */
+    public function refreshProperties(Website $website, WebsiteIntegration $integration): array
+    {
+        try {
+            $accessToken = $this->getValidAccessToken($integration);
+        } catch (Throwable $e) {
+            return [
+                'properties' => [],
+                'selected_property_id' => $integration->metadata['selected_property_id'] ?? null,
+                'error' => 'Google OAuth token expired — please click "Reconnect Google Account". (' . $e->getMessage() . ')',
+                'enable_url' => null,
+            ];
+        }
+
+        $fetchResult = $this->fetchGa4Properties($accessToken);
+        $properties = $fetchResult['properties'];
+        $meta = is_array($integration->metadata) ? $integration->metadata : [];
+
+        $selected = $this->matchBestProperty($website, $properties);
+        if (empty($meta['selected_property_id']) && $selected) {
+            $meta['selected_property_id'] = $selected['property_id'];
+            $meta['selected_property_name'] = $selected['display_name'];
+        }
+
+        $meta['properties'] = $properties;
+        $meta['admin_api_error'] = $fetchResult['error'];
+        $meta['admin_api_enable_url'] = $fetchResult['enable_url'];
+
+        $integration->update([
+            'metadata' => $meta,
+            'last_error' => $fetchResult['error'],
+            'last_synced_at' => now(),
+        ]);
+
+        return [
+            'properties' => $properties,
+            'selected_property_id' => $meta['selected_property_id'] ?? null,
+            'selected_property_name' => $meta['selected_property_name'] ?? null,
+            'error' => $fetchResult['error'],
+            'enable_url' => $fetchResult['enable_url'],
+        ];
     }
 
     /**
@@ -126,7 +192,9 @@ class GoogleAnalyticsService
     }
 
     /**
-     * List all GA4 properties accessible by the authorized Google account.
+     * List all GA4 properties accessible by the authorized Google account, with full error diagnostics.
+     *
+     * @return array{properties: array, error: ?string, enable_url: ?string}
      */
     public function fetchGa4Properties(string $accessToken): array
     {
@@ -138,7 +206,15 @@ class GoogleAnalyticsService
                 ]);
 
             if (!$res->successful()) {
-                return [];
+                $errMsg = (string) ($res->json('error.message') ?? ("Google Analytics Admin API HTTP {$res->status()}"));
+                $enableUrl = $this->extractEnableUrl($errMsg, 'https://console.cloud.google.com/apis/library/analyticsadmin.googleapis.com');
+                Log::warning('GA4 Admin API accountSummaries failed', ['status' => $res->status(), 'error' => $errMsg]);
+
+                return [
+                    'properties' => [],
+                    'error' => $errMsg,
+                    'enable_url' => $enableUrl,
+                ];
             }
 
             $out = [];
@@ -159,9 +235,17 @@ class GoogleAnalyticsService
                 }
             }
 
-            return $out;
-        } catch (Throwable) {
-            return [];
+            return [
+                'properties' => $out,
+                'error' => empty($out) ? 'No GA4 properties found on this Google account. Ensure this Google email has Viewer access in Google Analytics 4, or enter your numeric GA4 Property ID manually.' : null,
+                'enable_url' => null,
+            ];
+        } catch (Throwable $e) {
+            return [
+                'properties' => [],
+                'error' => 'Could not reach Google Analytics Admin API: ' . $e->getMessage(),
+                'enable_url' => null,
+            ];
         }
     }
 
@@ -179,9 +263,12 @@ class GoogleAnalyticsService
         $propertyId = preg_replace('/^properties\//', '', trim((string) ($meta['selected_property_id'] ?? '')));
 
         if ($propertyId === '') {
+            $err = $meta['admin_api_error']
+                ?: 'Google account is connected, but no GA4 Property ID is selected yet. Enable Google Analytics Admin API (or paste your numeric GA4 Property ID below) to start streaming live GA4 traffic.';
             return [
                 'available' => false,
-                'error' => 'Please select or enter your GA4 Numeric Property ID to load live Google Analytics 4 traffic.',
+                'error' => $err,
+                'enable_url' => $meta['admin_api_enable_url'] ?? 'https://console.cloud.google.com/apis/library/analyticsadmin.googleapis.com',
             ];
         }
 
@@ -190,7 +277,8 @@ class GoogleAnalyticsService
         } catch (Throwable $e) {
             return [
                 'available' => false,
-                'error' => 'GA4 authorization expired — please click "Reconnect GA4" to refresh access. (' . $e->getMessage() . ')',
+                'error' => 'GA4 authorization expired — please click "Reconnect Google Account" to refresh access. (' . $e->getMessage() . ')',
+                'enable_url' => null,
             ];
         }
 
@@ -214,11 +302,14 @@ class GoogleAnalyticsService
         ]);
 
         if (!$rtGeoRes->successful()) {
-            $errMsg = (string) ($rtGeoRes->json('error.message') ?? ('GA4 API HTTP ' . $rtGeoRes->status()));
+            $errMsg = (string) ($rtGeoRes->json('error.message') ?? ('GA4 Data API HTTP ' . $rtGeoRes->status()));
+            $enableUrl = $this->extractEnableUrl($errMsg, 'https://console.cloud.google.com/apis/library/analyticsdata.googleapis.com');
             $integration->update(['last_error' => $errMsg]);
+
             return [
                 'available' => false,
                 'error' => $errMsg,
+                'enable_url' => $enableUrl,
             ];
         }
 
@@ -232,7 +323,6 @@ class GoogleAnalyticsService
             'limit' => 35,
         ]);
 
-        // Aggregate realtime data
         $active5m = 0;
         $visitors30m = 0;
         $pageviews30m = 0;
@@ -313,10 +403,9 @@ class GoogleAnalyticsService
             }
         }
 
-        // If 5m sum was 0 but 30m has active users, reflect active users cleanly
         $activeNow = $active5m > 0 ? $active5m : $visitors30m;
 
-        // 3. Historical Report for exact Country + Region + City + Pages + Sources (when range != 30m)
+        // 3. Historical Report for exact Country + Region + City + Pages + Sources + Timeline (when range != 30m)
         $startDate = match ($range) {
             '7d' => '7daysAgo',
             '30d' => '30daysAgo',
@@ -327,7 +416,8 @@ class GoogleAnalyticsService
         $byRegion = [];
         $topPages = [];
         $topReferrers = [];
-        $devicesOut = [];
+        $histDevices = ['desktop' => 0, 'mobile' => 0, 'tablet' => 0];
+        $timeline = [];
         $uniqueVisitorsRange = $visitors30m;
         $pageviewsRange = $pageviews30m;
 
@@ -345,7 +435,7 @@ class GoogleAnalyticsService
                     ['name' => 'screenPageViews'],
                 ],
                 'orderBys' => [['metric' => ['metricName' => 'activeUsers'], 'desc' => true]],
-                'limit' => 100,
+                'limit' => 150,
             ]);
 
             if ($geoHistRes->successful()) {
@@ -426,7 +516,34 @@ class GoogleAnalyticsService
                 $byRegion = array_slice($regRows, 0, 30);
             }
 
-            // Pages & Sources from GA4 Historical
+            // Historical Timeline (hourly for 24h, daily for 7d/30d)
+            $timeDim = $range === '24h' ? 'dateHour' : 'date';
+            $tlRes = Http::withToken($accessToken)->timeout(10)->post($histUrl, [
+                'dateRanges' => [['startDate' => $startDate, 'endDate' => 'today']],
+                'dimensions' => [['name' => $timeDim]],
+                'metrics' => [['name' => 'activeUsers'], ['name' => 'screenPageViews']],
+                'orderBys' => [['dimension' => ['dimensionName' => $timeDim], 'desc' => false]],
+                'limit' => 48,
+            ]);
+            foreach ($tlRes->json('rows') ?? [] as $row) {
+                $rawD = (string) ($row['dimensionValues'][0]['value'] ?? '');
+                $label = $rawD;
+                if ($timeDim === 'dateHour' && strlen($rawD) === 10) {
+                    $label = substr($rawD, 8, 2) . ':00';
+                } elseif ($timeDim === 'date' && strlen($rawD) === 8) {
+                    $label = substr($rawD, 4, 2) . '/' . substr($rawD, 6, 2);
+                }
+                $timeline[] = [
+                    'label' => $label,
+                    'visitors' => (int) ($row['metricValues'][0]['value'] ?? 0),
+                    'pageviews' => (int) ($row['metricValues'][1]['value'] ?? 0),
+                ];
+            }
+            if ($timeDim === 'dateHour' && count($timeline) > 24) {
+                $timeline = array_slice($timeline, -24);
+            }
+
+            // Pages, Sources, and Devices from GA4 Historical
             $pageRes = Http::withToken($accessToken)->timeout(10)->post($histUrl, [
                 'dateRanges' => [['startDate' => $startDate, 'endDate' => 'today']],
                 'dimensions' => [['name' => 'pagePath'], ['name' => 'pageTitle']],
@@ -459,9 +576,31 @@ class GoogleAnalyticsService
                     'pageviews' => (int) ($row['metricValues'][1]['value'] ?? 0),
                 ];
             }
+
+            $devRes = Http::withToken($accessToken)->timeout(10)->post($histUrl, [
+                'dateRanges' => [['startDate' => $startDate, 'endDate' => 'today']],
+                'dimensions' => [['name' => 'deviceCategory']],
+                'metrics' => [['name' => 'activeUsers']],
+            ]);
+            foreach ($devRes->json('rows') ?? [] as $row) {
+                $dk = strtolower((string) ($row['dimensionValues'][0]['value'] ?? 'desktop'));
+                if (isset($histDevices[$dk])) {
+                    $histDevices[$dk] += (int) ($row['metricValues'][0]['value'] ?? 0);
+                }
+            }
         }
 
-        // Fallback to realtime tables when range == 30m or historical was empty
+        // Fallbacks when range == 30m or historical timeline was empty
+        if (empty($timeline)) {
+            for ($i = 29; $i >= 0; $i--) {
+                $dt = now()->subMinutes($i);
+                $timeline[] = [
+                    'label' => $dt->format('H:i'),
+                    'pageviews' => $minMap[$i]['pageviews'] ?? 0,
+                    'visitors' => $minMap[$i]['visitors'] ?? 0,
+                ];
+            }
+        }
         if (empty($byCountry) && !empty($rtCountries)) {
             $denom = max(1, array_sum($rtCountries));
             foreach ($rtCountries as $cc => $u) {
@@ -484,19 +623,10 @@ class GoogleAnalyticsService
             $topPages = array_values($rtPages);
         }
 
-        // Minute-by-minute 30m timeline
-        $timeline = [];
-        for ($i = 29; $i >= 0; $i--) {
-            $dt = now()->subMinutes($i);
-            $timeline[] = [
-                'label' => $dt->format('H:i'),
-                'pageviews' => $minMap[$i]['pageviews'] ?? 0,
-                'visitors' => $minMap[$i]['visitors'] ?? 0,
-            ];
-        }
-
-        $devTotal = max(1, array_sum($rtDevices));
-        foreach ($rtDevices as $dev => $cnt) {
+        $finalDevices = array_sum($histDevices) > 0 ? $histDevices : $rtDevices;
+        $devTotal = max(1, array_sum($finalDevices));
+        $devicesOut = [];
+        foreach ($finalDevices as $dev => $cnt) {
             $devicesOut[] = [
                 'device' => $dev,
                 'visitors' => $cnt,
@@ -532,6 +662,17 @@ class GoogleAnalyticsService
             'browsers' => [],
             'live_feed' => $liveFeed,
         ];
+    }
+
+    private function extractEnableUrl(string $errorMessage, string $fallbackUrl): ?string
+    {
+        if (preg_match('#https://console\.(?:developers|cloud)\.google\.com/[^\s"\')]+#i', $errorMessage, $m)) {
+            return rtrim($m[0], '.,;');
+        }
+        if (str_contains(strtolower($errorMessage), 'not been used') || str_contains(strtolower($errorMessage), 'is disabled')) {
+            return $fallbackUrl;
+        }
+        return null;
     }
 
     private function getValidAccessToken(WebsiteIntegration $integration): string
@@ -577,11 +718,20 @@ class GoogleAnalyticsService
             return null;
         }
         $domainStem = strtolower(preg_replace('/^www\./i', '', (string) $website->domain));
+        $domainRoot = explode('.', $domainStem)[0] ?? $domainStem;
         $nameLower = strtolower((string) $website->name);
 
         foreach ($properties as $p) {
             $disp = strtolower((string) ($p['display_name'] ?? ''));
-            if ($disp !== '' && (str_contains($disp, $domainStem) || str_contains($domainStem, str_replace(' ', '', $disp)) || ($nameLower !== '' && str_contains($disp, $nameLower)))) {
+            $dispCompact = str_replace([' ', '-', '_'], '', $disp);
+            if (
+                $disp !== '' && (
+                    str_contains($disp, $domainStem)
+                    || str_contains($dispCompact, $domainRoot)
+                    || str_contains($domainRoot, $dispCompact)
+                    || ($nameLower !== '' && str_contains($disp, $nameLower))
+                )
+            ) {
                 return $p;
             }
         }

@@ -54,6 +54,7 @@ export function LiveTrafficView({ website }: LiveTrafficViewProps) {
   const [copied, setCopied] = useState(false);
   const [isPinging, setIsPinging] = useState(false);
   const [isConnectingGa4, setIsConnectingGa4] = useState(false);
+  const [isRefreshingProps, setIsRefreshingProps] = useState(false);
   const [manualPropertyId, setManualPropertyId] = useState('');
   const [isSavingProp, setIsSavingProp] = useState(false);
 
@@ -75,7 +76,10 @@ export function LiveTrafficView({ website }: LiveTrafficViewProps) {
           }
           const hasLiveSource =
             res.data.data_source === 'google_analytics_4' || Boolean(res.data.tracker?.has_real_events);
-          if (!hasLiveSource && !silent) {
+          const ga4NeedsSetup =
+            Boolean(res.data.ga4?.connected) &&
+            (!res.data.ga4?.selected_property_id || Boolean(res.data.ga4_error));
+          if ((!hasLiveSource || ga4NeedsSetup) && !silent) {
             setShowSetup(true);
           }
         }
@@ -165,22 +169,24 @@ export function LiveTrafficView({ website }: LiveTrafficViewProps) {
     }
   };
 
-  const handleClearTestEvents = async () => {
-    const res = await api.delete(`/websites/${website.id}/traffic/test-events`);
+  const handleClearTestEvents = async (clearAll = false) => {
+    const res = await api.delete(`/websites/${website.id}/traffic/test-events${clearAll ? '?all=1' : ''}`);
     if (res.success) {
       setIncludeTest(false);
-      toast.success('Cleared all synthetic test visits.');
+      toast.success(clearAll ? 'Reset all 1st-party tracker hits.' : 'Cleared all synthetic test visits.');
       await loadRealtime(true);
     }
   };
 
-  const handleConnectGa4 = async () => {
+  const handleConnectGa4 = async (forceOauth = false) => {
     setIsConnectingGa4(true);
     try {
-      const res = await api.get<any>(`/websites/${website.id}/traffic/ga4/connect`);
+      const res = await api.get<any>(
+        `/websites/${website.id}/traffic/ga4/connect${forceOauth ? '?force_oauth=1' : ''}`
+      );
       if (res.success && res.data) {
         if (res.data.reused_google_oauth) {
-          toast.success('Google Analytics 4 connected using your existing Google authorization!');
+          toast.success('Google Analytics 4 connected in 1 click using your existing Google account!');
           setSource('ga4');
           await loadRealtime(false);
         } else if (res.data.authorization_url) {
@@ -193,6 +199,29 @@ export function LiveTrafficView({ website }: LiveTrafficViewProps) {
       toast.error('Network error connecting Google Analytics 4.');
     } finally {
       setIsConnectingGa4(false);
+    }
+  };
+
+  const handleRefreshGa4Properties = async () => {
+    setIsRefreshingProps(true);
+    try {
+      const res = await api.post<any>(`/websites/${website.id}/traffic/ga4/refresh-properties`, {});
+      if (res.success && res.data) {
+        if (res.data.error) {
+          toast.error(res.data.error);
+        } else {
+          toast.success(`Found ${(res.data.properties || []).length} GA4 property(ies)!`);
+          if (res.data.selected_property_id) {
+            setManualPropertyId(res.data.selected_property_id);
+            setSource('ga4');
+          }
+        }
+        await loadRealtime(false);
+      } else {
+        toast.error(res.error?.message || 'Could not refresh GA4 properties.');
+      }
+    } finally {
+      setIsRefreshingProps(false);
     }
   };
 
@@ -375,12 +404,12 @@ export function LiveTrafficView({ website }: LiveTrafficViewProps) {
             {installCheck.detected_ga4_id && !ga4.connected && (
               <button
                 type="button"
-                onClick={handleConnectGa4}
+                onClick={() => handleConnectGa4(false)}
                 disabled={isConnectingGa4}
                 className="px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-semibold transition inline-flex items-center gap-1.5"
               >
                 <BarChart3 className="w-3.5 h-3.5" />
-                <span>{isConnectingGa4 ? 'Connecting...' : 'Connect GA4 Now'}</span>
+                <span>{isConnectingGa4 ? 'Connecting...' : 'Connect GA4 Now (1-Click)'}</span>
               </button>
             )}
             <button
@@ -394,16 +423,56 @@ export function LiveTrafficView({ website }: LiveTrafficViewProps) {
         </div>
       )}
 
-      {/* GA4 Error Notice (if Analytics Data API needs enabling in Google Cloud Console) */}
-      {data?.ga4_error && (
-        <div className="p-4 rounded-2xl bg-rose-950/25 border border-rose-600/40 text-xs text-rose-200 flex items-start gap-2.5">
-          <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-          <div className="space-y-1">
-            <div className="font-bold">Google Analytics 4 API Notice</div>
-            <p className="text-rose-200/90">{data.ga4_error}</p>
-            <p className="text-zinc-400">
-              Make sure <strong>Google Analytics Data API</strong> and <strong>Google Analytics Admin API</strong> are enabled in your Google Cloud project, and your numeric GA4 Property ID is selected below.
-            </p>
+      {/* GA4 Exact Diagnostics & 1-Click API Fix Notice (Always visible when GA4 is connected with an API/property issue) */}
+      {(data?.ga4_error || (ga4.connected && !ga4.selected_property_id)) && (
+        <div className="p-4 rounded-2xl bg-rose-950/25 border border-rose-600/40 text-xs text-rose-200 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <div className="font-bold text-rose-100">
+                  Google Account Connected — Action Needed to Pull Exact GA4 Data
+                </div>
+                <p className="text-rose-200/90 leading-relaxed">
+                  {data?.ga4_error || ga4.admin_api_error || 'No GA4 Property ID is selected yet for this website.'}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleRefreshGa4Properties}
+              disabled={isRefreshingProps}
+              className="shrink-0 px-3 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-100 font-semibold inline-flex items-center gap-1.5"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-sky-400 ${isRefreshingProps ? 'animate-spin' : ''}`} />
+              <span>{isRefreshingProps ? 'Scanning...' : 'Re-Scan GA4 Properties'}</span>
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px]">
+            <a
+              href={data?.ga4_enable_url || 'https://console.cloud.google.com/apis/library/analyticsdata.googleapis.com'}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold"
+            >
+              1. Enable Google Analytics Data API ↗
+            </a>
+            <a
+              href={ga4.admin_api_enable_url || 'https://console.cloud.google.com/apis/library/analyticsadmin.googleapis.com'}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 font-semibold"
+            >
+              2. Enable Google Analytics Admin API ↗
+            </a>
+            <button
+              type="button"
+              onClick={() => handleConnectGa4(true)}
+              className="px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 font-medium"
+            >
+              Reconnect Google Account (Grant Analytics Scope)
+            </button>
           </div>
         </div>
       )}
@@ -432,17 +501,41 @@ export function LiveTrafficView({ website }: LiveTrafficViewProps) {
             </div>
 
             {!ga4.connected ? (
-              <button
-                type="button"
-                onClick={handleConnectGa4}
-                disabled={isConnectingGa4}
-                className="w-full py-2.5 px-4 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-semibold inline-flex items-center justify-center gap-2 transition"
-              >
-                <Link2 className="w-4 h-4" />
-                <span>{isConnectingGa4 ? 'Connecting Google Analytics 4...' : 'Connect Google Analytics 4 (1-Click OAuth)'}</span>
-              </button>
+              <div className="space-y-2">
+                {ga4.gsc_connected && (
+                  <div className="p-2.5 rounded-xl bg-emerald-950/25 border border-emerald-700/40 text-[11px] text-emerald-300">
+                    Google Search Console is connected on this website — click below to connect Google Analytics 4 with the same Google account in 1 click!
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => handleConnectGa4(false)}
+                  disabled={isConnectingGa4}
+                  className="w-full py-2.5 px-4 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white text-xs font-semibold inline-flex items-center justify-center gap-2 transition"
+                >
+                  <Link2 className="w-4 h-4" />
+                  <span>{isConnectingGa4 ? 'Connecting Google Analytics 4...' : 'Connect Google Analytics 4 (1-Click OAuth)'}</span>
+                </button>
+              </div>
             ) : (
               <div className="space-y-3 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] text-emerald-400 font-medium">
+                    {(ga4.properties || []).length > 0
+                      ? `${ga4.properties.length} GA4 property(ies) found on your Google account`
+                      : 'Google account linked — click Re-Scan or enter Property ID below'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleRefreshGa4Properties}
+                    disabled={isRefreshingProps}
+                    className="text-[11px] text-sky-400 hover:text-sky-300 font-semibold inline-flex items-center gap-1"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isRefreshingProps ? 'animate-spin' : ''}`} />
+                    <span>Re-Scan</span>
+                  </button>
+                </div>
+
                 {Array.isArray(ga4.properties) && ga4.properties.length > 0 && (
                   <div>
                     <label className="block text-zinc-400 mb-1 font-medium">Select GA4 Property</label>
@@ -463,7 +556,7 @@ export function LiveTrafficView({ website }: LiveTrafficViewProps) {
 
                 <div>
                   <label className="block text-zinc-400 mb-1 font-medium">
-                    Or Enter Numeric GA4 Property ID (Admin → Property Details)
+                    Or Enter Numeric GA4 Property ID (GA4 Admin → Property Details)
                   </label>
                   <div className="flex gap-2">
                     <input
@@ -487,7 +580,7 @@ export function LiveTrafficView({ website }: LiveTrafficViewProps) {
                 <div className="flex items-center justify-between pt-1">
                   <button
                     type="button"
-                    onClick={handleConnectGa4}
+                    onClick={() => handleConnectGa4(true)}
                     className="text-sky-400 hover:text-sky-300 font-medium"
                   >
                     Re-authorize Google Account
@@ -613,12 +706,22 @@ export function LiveTrafficView({ website }: LiveTrafficViewProps) {
                     </label>
                     <button
                       type="button"
-                      onClick={handleClearTestEvents}
+                      onClick={() => handleClearTestEvents(false)}
                       className="text-rose-400 hover:text-rose-300 inline-flex items-center gap-1"
                     >
                       <Trash2 className="w-3 h-3" /> Clear Tests
                     </button>
                   </>
+                )}
+                {(tracker.real_events_all_time ?? 0) > 0 && !installCheck?.tracker_installed && (
+                  <button
+                    type="button"
+                    onClick={() => handleClearTestEvents(true)}
+                    className="text-zinc-400 hover:text-rose-300 inline-flex items-center gap-1"
+                    title="Clear old pre-install tracker events"
+                  >
+                    <Trash2 className="w-3 h-3" /> Reset Old Hits ({tracker.real_events_all_time})
+                  </button>
                 )}
               </div>
             </div>

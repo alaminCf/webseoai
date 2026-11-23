@@ -183,6 +183,7 @@ Route::prefix('v1')->group(function () {
             Route::post('/websites/{website}/traffic/test-ping', [LiveTrafficController::class, 'testPing']);
             Route::delete('/websites/{website}/traffic/test-events', [LiveTrafficController::class, 'clearTestEvents']);
             Route::get('/websites/{website}/traffic/ga4/connect', [LiveTrafficController::class, 'connectGa4']);
+            Route::post('/websites/{website}/traffic/ga4/refresh-properties', [LiveTrafficController::class, 'refreshGa4Properties']);
             Route::post('/websites/{website}/traffic/ga4/property', [LiveTrafficController::class, 'selectGa4Property']);
             Route::post('/websites/{website}/traffic/ga4/disconnect', [LiveTrafficController::class, 'disconnectGa4']);
 

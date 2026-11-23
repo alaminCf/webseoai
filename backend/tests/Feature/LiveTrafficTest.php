@@ -187,4 +187,80 @@ class LiveTrafficTest extends TestCase
             ->getJson("/api/v1/websites/{$website->id}/traffic/realtime")
             ->assertStatus(403);
     }
+
+    public function test_ga4_one_click_reuses_org_google_oauth_token_and_surfaces_api_diagnostics(): void
+    {
+        $user = User::factory()->create();
+        $org = Organization::create(['name' => 'Techboloy', 'slug' => 'techboloy-ga4', 'owner_id' => $user->id]);
+        OrganizationMember::create(['organization_id' => $org->id, 'user_id' => $user->id, 'role' => OrganizationMember::ROLE_OWNER]);
+
+        $siteA = Website::create([
+            'organization_id' => $org->id,
+            'name' => 'CareMate BD',
+            'domain' => 'carematebd.com',
+            'target_url' => 'https://carematebd.com',
+            'platform' => Website::PLATFORM_CUSTOM,
+        ]);
+
+        $siteB = Website::create([
+            'organization_id' => $org->id,
+            'name' => 'Handyman Super Services',
+            'domain' => 'handymansuperservices.com',
+            'target_url' => 'https://handymansuperservices.com',
+            'platform' => Website::PLATFORM_WORDPRESS,
+        ]);
+
+        // Site A already connected Google OAuth with both webmasters + analytics.readonly scopes
+        WebsiteIntegration::create([
+            'organization_id' => $org->id,
+            'website_id' => $siteA->id,
+            'provider' => WebsiteIntegration::PROVIDER_GSC,
+            'encrypted_credentials' => [
+                'access_token' => 'org_google_token',
+                'refresh_token' => 'org_refresh_token',
+                'scope' => 'https://www.googleapis.com/auth/webmasters.readonly https://www.googleapis.com/auth/analytics.readonly',
+                'expires_at' => now()->addHour()->timestamp,
+                'is_sandbox' => false,
+            ],
+            'status' => WebsiteIntegration::STATUS_CONNECTED,
+        ]);
+
+        // First call simulates Google Analytics Admin API disabled -> exact error & enable_url must be surfaced!
+        Http::fake([
+            'https://analyticsadmin.googleapis.com/v1beta/accountSummaries*' => Http::sequence()
+                ->push([
+                    'error' => [
+                        'message' => 'Google Analytics Admin API has not been used in project 12345 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/analyticsadmin.googleapis.com/overview?project=12345 then retry.',
+                    ],
+                ], 403)
+                ->push([
+                    'accountSummaries' => [[
+                        'displayName' => 'Techboloy Agency GA4',
+                        'propertySummaries' => [[
+                            'property' => 'properties/381234567',
+                            'displayName' => 'Handyman Super Services SG',
+                        ]],
+                    ]],
+                ], 200),
+        ]);
+
+        // 1-Click connect on Site B immediately reuses org Google token (zero OAuth popup!) and surfaces Admin API error clearly
+        $connRes = $this->actingAs($user)
+            ->withHeaders(['X-Organization-Id' => (string) $org->id])
+            ->getJson("/api/v1/websites/{$siteB->id}/traffic/ga4/connect");
+
+        $connRes->assertOk()
+            ->assertJsonPath('data.reused_google_oauth', true)
+            ->assertJsonPath('data.ga4.connected', true);
+        $this->assertStringContainsString('analyticsadmin.googleapis.com', (string) $connRes->json('data.ga4.admin_api_enable_url'));
+
+        // After user enables Admin API in Google Cloud Console, Re-Scan immediately discovers & auto-selects Handyman property!
+        $refreshRes = $this->actingAs($user)
+            ->withHeaders(['X-Organization-Id' => (string) $org->id])
+            ->postJson("/api/v1/websites/{$siteB->id}/traffic/ga4/refresh-properties");
+
+        $refreshRes->assertOk()
+            ->assertJsonPath('data.selected_property_id', '381234567')
+            ->assertJsonPath('data.error', null);
+    }
 }
