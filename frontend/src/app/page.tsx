@@ -27,6 +27,7 @@ import { SeoActionPlanView } from '@/components/SeoActionPlanView';
 import { AuditOverviewView } from '@/components/AuditOverviewView';
 import { CompetitorAnalysisView } from '@/components/competitors/CompetitorAnalysisView';
 import { ContentStudioView } from '@/components/ContentStudioView';
+import { RankCheckerView } from '@/components/RankCheckerView';
 import { UnifiedPerformanceView } from '@/components/UnifiedPerformanceView';
 import { AutopilotView } from '@/components/AutopilotView';
 import { UnifiedSettingsView } from '@/components/UnifiedSettingsView';
@@ -49,6 +50,7 @@ export default function DashboardPage() {
   const pendingWebsiteIdRef = useRef<number | null>(null);
   const [isLoadingWebsites, setIsLoadingWebsites] = useState<boolean>(false);
   const [showArchived, setShowArchived] = useState<boolean>(false);
+  const [pendingRankKeyword, setPendingRankKeyword] = useState<string | null>(null);
 
   // Handle OAuth redirect return params (e.g. /?tab=performance&gsc=connected&website_id=3)
   useEffect(() => {
@@ -60,7 +62,7 @@ export default function DashboardPage() {
     const reason = params.get('reason');
     const websiteIdParam = params.get('website_id');
 
-    const validTabs = ['overview', 'websites', 'action_plan', 'audits', 'competitors', 'content', 'live_traffic', 'performance', 'autopilot', 'team', 'settings'];
+    const validTabs = ['overview', 'websites', 'action_plan', 'audits', 'competitors', 'content', 'rank_checker', 'live_traffic', 'performance', 'autopilot', 'team', 'settings'];
     if (tab && validTabs.includes(tab)) {
       setActiveTab(tab);
     }
@@ -324,12 +326,25 @@ export default function DashboardPage() {
             <ContentStudioView website={selectedWebsite} />
           )}
 
+          {/* SECTION 5B: LIVE GEO-LOCATED RANK CHECKER */}
+          {activeTab === 'rank_checker' && (
+            <RankCheckerView
+              website={selectedWebsite}
+              initialKeyword={pendingRankKeyword}
+              onConsumeInitialKeyword={() => setPendingRankKeyword(null)}
+            />
+          )}
+
           {/* SECTION 6: PERFORMANCE & LIVE TRAFFIC */}
           {(activeTab === 'performance' || activeTab === 'live_traffic') && (
             <UnifiedPerformanceView
               website={selectedWebsite}
               initialSubTab={activeTab === 'live_traffic' ? 'live' : 'gsc'}
               onNavigateToContent={() => setActiveTab('content')}
+              onCheckLiveRank={(kw) => {
+                setPendingRankKeyword(kw);
+                setActiveTab('rank_checker');
+              }}
             />
           )}
 

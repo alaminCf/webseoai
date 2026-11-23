@@ -19,6 +19,7 @@ use App\Http\Controllers\Api\V1\BillingController;
 use App\Http\Controllers\Api\V1\ClientManagementController;
 use App\Http\Controllers\Api\V1\CompetitorAnalysisController;
 use App\Http\Controllers\Api\V1\LiveTrafficController;
+use App\Http\Controllers\Api\V1\RankCheckerController;
 use App\Http\Controllers\Api\V1\WhiteLabelReportController;
 use Illuminate\Support\Facades\Route;
 
@@ -186,6 +187,11 @@ Route::prefix('v1')->group(function () {
             Route::post('/websites/{website}/traffic/ga4/refresh-properties', [LiveTrafficController::class, 'refreshGa4Properties']);
             Route::post('/websites/{website}/traffic/ga4/property', [LiveTrafficController::class, 'selectGa4Property']);
             Route::post('/websites/{website}/traffic/ga4/disconnect', [LiveTrafficController::class, 'disconnectGa4']);
+
+            // Live Geo-Located Keyword Rank Checker & SERP Simulator
+            Route::get('/websites/{website}/rank-checker/context', [RankCheckerController::class, 'context']);
+            Route::post('/websites/{website}/rank-checker/check', [RankCheckerController::class, 'check'])->middleware('throttle:30,1');
+            Route::get('/websites/{website}/rank-checker/history/{snapshot}', [RankCheckerController::class, 'showSnapshot']);
 
             // Phase 4: Search Opportunities
             Route::get('/websites/{website}/opportunities', [SearchOpportunityController::class, 'index']);

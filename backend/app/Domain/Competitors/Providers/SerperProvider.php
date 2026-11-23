@@ -159,7 +159,7 @@ class SerperProvider implements CompetitorProviderInterface
         return ['available' => false, 'provider' => $this->getName(), 'summary' => [], 'backlinks' => [], 'error' => 'Serper.dev does not provide backlink datasets.'];
     }
 
-    public function fetchSerp(string $keyword, string $country = 'US', string $language = 'en', string $device = 'desktop', ?string $location = null): array
+    public function fetchSerp(string $keyword, string $country = 'US', string $language = 'en', string $device = 'desktop', ?string $location = null, int $depth = 20): array
     {
         if (!$this->isConfigured()) {
             return ['available' => false, 'provider' => $this->getName(), 'serp_features' => [], 'organic_results' => [], 'error' => 'SERPER_API_KEY is not configured.'];
@@ -167,12 +167,13 @@ class SerperProvider implements CompetitorProviderInterface
 
         try {
             $gl = CountryCatalog::gl($country);
-            $geoLocation = $location ?: CountryCatalog::serperLocation($country);
+            $geoLocation = trim((string) ($location ?? '')) ?: CountryCatalog::serperLocation($country);
+            $num = max(10, min(100, $depth));
             $payload = [
                 'q' => $keyword,
                 'gl' => $gl,
                 'hl' => strtolower($language),
-                'num' => 20,
+                'num' => $num,
             ];
             if ($geoLocation !== '') {
                 $payload['location'] = $geoLocation;
@@ -199,22 +200,68 @@ class SerperProvider implements CompetitorProviderInterface
             foreach ($json['organic'] ?? [] as $idx => $item) {
                 $url = (string) ($item['link'] ?? '');
                 $host = preg_replace('/^www\./i', '', strtolower((string) parse_url($url, PHP_URL_HOST)));
+                $pos = (int) ($item['position'] ?? ($idx + 1));
                 $organic[] = [
-                    'position' => (int) ($item['position'] ?? ($idx + 1)),
+                    'position' => $pos,
+                    'google_page' => (int) ceil($pos / 10),
+                    'rank_on_page' => (($pos - 1) % 10) + 1,
                     'domain' => $host,
                     'url' => $url,
                     'title' => (string) ($item['title'] ?? ''),
                     'snippet' => (string) ($item['snippet'] ?? ''),
+                    'date' => $item['date'] ?? null,
+                    'sitelinks' => array_slice(is_array($item['sitelinks'] ?? null) ? $item['sitelinks'] : [], 0, 4),
                 ];
+            }
+
+            $places = [];
+            foreach ($json['places'] ?? [] as $pIdx => $pl) {
+                $places[] = [
+                    'position' => (int) ($pl['position'] ?? ($pIdx + 1)),
+                    'title' => (string) ($pl['title'] ?? ''),
+                    'address' => (string) ($pl['address'] ?? ''),
+                    'rating' => $pl['rating'] ?? null,
+                    'rating_count' => $pl['ratingCount'] ?? null,
+                    'category' => $pl['category'] ?? null,
+                    'website' => $pl['website'] ?? null,
+                ];
+            }
+
+            $paa = [];
+            foreach ($json['peopleAlsoAsk'] ?? [] as $q) {
+                $paa[] = [
+                    'question' => (string) ($q['question'] ?? ''),
+                    'snippet' => (string) ($q['snippet'] ?? ''),
+                    'title' => (string) ($q['title'] ?? ''),
+                    'link' => (string) ($q['link'] ?? ''),
+                ];
+            }
+
+            $related = [];
+            foreach ($json['relatedSearches'] ?? [] as $r) {
+                if (!empty($r['query'])) {
+                    $related[] = (string) $r['query'];
+                }
             }
 
             return [
                 'available' => true,
                 'provider' => $this->getName(),
                 'http_status' => $res->status(),
-                'cost_usd' => 0.001,
+                'cost_usd' => $num > 10 ? 0.002 : 0.001,
                 'serp_features' => $features,
                 'organic_results' => $organic,
+                'local_pack' => $places,
+                'people_also_ask' => $paa,
+                'related_searches' => $related,
+                'answer_box' => $json['answerBox'] ?? null,
+                'search_parameters' => [
+                    'q' => $keyword,
+                    'gl' => $gl,
+                    'hl' => strtolower($language),
+                    'location' => $geoLocation,
+                    'num' => $num,
+                ],
             ];
         } catch (Throwable $e) {
             return ['available' => false, 'provider' => $this->getName(), 'serp_features' => [], 'organic_results' => [], 'error' => $e->getMessage()];

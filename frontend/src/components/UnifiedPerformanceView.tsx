@@ -17,12 +17,14 @@ interface UnifiedPerformanceViewProps {
   website: Website | null;
   initialSubTab?: 'live' | 'gsc' | 'opportunities' | 'keywords';
   onNavigateToContent?: () => void;
+  onCheckLiveRank?: (keyword: string) => void;
 }
 
 export function UnifiedPerformanceView({
   website,
   initialSubTab = 'live',
   onNavigateToContent,
+  onCheckLiveRank,
 }: UnifiedPerformanceViewProps) {
   const [subTab, setSubTab] = useState<'live' | 'gsc' | 'opportunities' | 'keywords'>(initialSubTab);
 
@@ -101,6 +103,7 @@ export function UnifiedPerformanceView({
           website={website}
           onNavigateToOpportunities={() => setSubTab('opportunities')}
           onNavigateToKeywords={() => setSubTab('keywords')}
+          onCheckLiveRank={onCheckLiveRank}
         />
       )}
 

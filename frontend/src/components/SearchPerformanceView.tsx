@@ -25,6 +25,7 @@ import {
   Clock,
   ChevronRight,
   Zap,
+  Crosshair,
 } from 'lucide-react';
 import { Website, SearchConsoleStatus, SearchPerformanceData } from '@/types';
 import { api } from '@/lib/api';
@@ -34,12 +35,14 @@ interface SearchPerformanceViewProps {
   website: Website | null;
   onNavigateToOpportunities?: () => void;
   onNavigateToKeywords?: () => void;
+  onCheckLiveRank?: (keyword: string) => void;
 }
 
 export function SearchPerformanceView({
   website,
   onNavigateToOpportunities,
   onNavigateToKeywords,
+  onCheckLiveRank,
 }: SearchPerformanceViewProps) {
   const toast = useToast();
 
@@ -674,6 +677,9 @@ export function SearchPerformanceView({
                       <th className="px-4 py-3 text-right">Impressions</th>
                       <th className="px-4 py-3 text-right">CTR</th>
                       <th className="px-4 py-3 text-right">Avg Position</th>
+                      {onCheckLiveRank && (
+                        <th className="px-4 py-3 text-right">Live Google Check</th>
+                      )}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-800/60 text-zinc-200">
@@ -718,11 +724,23 @@ export function SearchPerformanceView({
                               {q.position}
                             </span>
                           </td>
+                          {onCheckLiveRank && (
+                            <td className="px-4 py-3 text-right">
+                              <button
+                                type="button"
+                                onClick={() => onCheckLiveRank(q.query)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[11px] font-semibold transition whitespace-nowrap"
+                              >
+                                <Crosshair className="w-3 h-3" />
+                                Check Live Rank
+                              </button>
+                            </td>
+                          )}
                         </tr>
                       ))
                     ) : (
                       <tr>
-                        <td colSpan={5} className="px-4 py-8 text-center text-zinc-400">
+                        <td colSpan={onCheckLiveRank ? 6 : 5} className="px-4 py-8 text-center text-zinc-400">
                           No query performance rows recorded for this period. Click Sync Data to refresh.
                         </td>
                       </tr>
