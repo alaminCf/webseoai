@@ -591,7 +591,7 @@ export function RankCheckerView({
               </div>
               <div className="flex items-center gap-2">
                 <a
-                  href="https://serper.dev/api-key"
+                  href="https://serper.dev"
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-[11px] font-semibold text-zinc-200 transition"

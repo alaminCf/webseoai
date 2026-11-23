@@ -147,7 +147,7 @@ class SerperProvider implements CompetitorProviderInterface
                 'http_status' => $res->status(),
                 'error' => $bodyMsg !== ''
                     ? "Serper.dev rejected this key (HTTP {$res->status()}): {$bodyMsg}"
-                    : "Serper.dev rejected this key (HTTP {$res->status()}). Please check your API key at serper.dev/api-key.",
+                    : "Serper.dev rejected this key (HTTP {$res->status()}). Please check your API key at serper.dev.",
             ];
         } catch (Throwable $e) {
             return [
