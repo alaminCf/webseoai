@@ -18,6 +18,7 @@ use App\Http\Controllers\Api\V1\WebsiteIntegrationController;
 use App\Http\Controllers\Api\V1\BillingController;
 use App\Http\Controllers\Api\V1\ClientManagementController;
 use App\Http\Controllers\Api\V1\CompetitorAnalysisController;
+use App\Http\Controllers\Api\V1\LiveTrafficController;
 use App\Http\Controllers\Api\V1\WhiteLabelReportController;
 use Illuminate\Support\Facades\Route;
 
@@ -62,6 +63,11 @@ Route::prefix('v1')->group(function () {
     // Public OAuth Callbacks
     Route::get('/integrations/google-search-console/callback', [SearchConsoleController::class, 'callback']);
     Route::get('/integrations/google-search-console/sandbox-callback', [SearchConsoleController::class, 'callback']);
+
+    // Public Real-Time Traffic Tracker Script & Beacon Ingestion (CORS-enabled, token-scoped)
+    Route::get('/t/{token}.js', [LiveTrafficController::class, 'script']);
+    Route::options('/t/collect', [LiveTrafficController::class, 'preflight']);
+    Route::post('/t/collect', [LiveTrafficController::class, 'collect'])->middleware('throttle:120,1');
 
     // Phase 7: Public Billing Webhook
     Route::post('/billing/webhook', [BillingController::class, 'webhook']);
@@ -169,6 +175,10 @@ Route::prefix('v1')->group(function () {
                 ->middleware('org.role:seo_manager');
             Route::get('/websites/{website}/search-console/performance', [SearchConsoleController::class, 'performance']);
             Route::post('/websites/{website}/search-console/inspect', [SearchConsoleController::class, 'inspectUrl']);
+
+            // Real-Time Live Traffic & Country/Region Geo Analytics
+            Route::get('/websites/{website}/traffic/realtime', [LiveTrafficController::class, 'realtime']);
+            Route::post('/websites/{website}/traffic/test-ping', [LiveTrafficController::class, 'testPing']);
 
             // Phase 4: Search Opportunities
             Route::get('/websites/{website}/opportunities', [SearchOpportunityController::class, 'index']);

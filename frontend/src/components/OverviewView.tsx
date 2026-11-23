@@ -44,8 +44,12 @@ interface DashboardStats {
   pendingApprovals: number;
   topRecommendation: AiRecommendation | null;
   gscConnected: boolean;
+  gscProperty: string | null;
   searchImpressions: number | null;
   searchClicks: number | null;
+  liveVisitorsNow: number;
+  livePageviews24h: number;
+  liveTrackerActive: boolean;
   autopilotActive: boolean;
 }
 
@@ -68,8 +72,12 @@ export function OverviewView({
     pendingApprovals: 0,
     topRecommendation: null,
     gscConnected: false,
+    gscProperty: null,
     searchImpressions: null,
     searchClicks: null,
+    liveVisitorsNow: 0,
+    livePageviews24h: 0,
+    liveTrackerActive: false,
     autopilotActive: false,
   });
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -114,27 +122,50 @@ export function OverviewView({
         verifiedFixes = activeRecs.filter((r) => r.status === 'applied').length;
       }
 
-      // 3. Check GSC integration & performance
+      // 3. Check real GSC integration status & 28d search performance
       let gscConnected = false;
+      let gscProperty: string | null = null;
       let searchImpressions: number | null = null;
       let searchClicks: number | null = null;
       try {
-        const perfRes = await api.get<any>(`/websites/${website.id}/search-performance`);
-        if (perfRes.success && perfRes.data) {
+        const statusRes = await api.get<any>(`/websites/${website.id}/search-console/status`);
+        if (statusRes.success && statusRes.data?.connected) {
           gscConnected = true;
-          searchImpressions = perfRes.data.total_impressions ?? null;
-          searchClicks = perfRes.data.total_clicks ?? null;
+          gscProperty = statusRes.data.selected_property ?? null;
+          const perfRes = await api.get<any>(`/websites/${website.id}/search-console/performance?range=28d`);
+          if (perfRes.success && perfRes.data) {
+            searchClicks = perfRes.data.summary?.total_clicks ?? perfRes.data.total_clicks ?? 0;
+            searchImpressions = perfRes.data.summary?.total_impressions ?? perfRes.data.total_impressions ?? 0;
+          } else {
+            searchClicks = 0;
+            searchImpressions = 0;
+          }
         }
       } catch {
         // GSC not connected or error, keep false
       }
 
-      // 4. Check Autopilot status
+      // 3b. Fetch Real-Time Live Traffic summary
+      let liveVisitorsNow = 0;
+      let livePageviews24h = 0;
+      let liveTrackerActive = false;
+      try {
+        const liveRes = await api.get<any>(`/websites/${website.id}/traffic/realtime?range=24h`);
+        if (liveRes.success && liveRes.data) {
+          liveVisitorsNow = liveRes.data.summary?.active_visitors_now ?? 0;
+          livePageviews24h = liveRes.data.summary?.pageviews_range ?? 0;
+          liveTrackerActive = Boolean(liveRes.data.tracker?.has_events);
+        }
+      } catch {
+        // Ignored
+      }
+
+      // 4. Check Autopilot status (active automation rules)
       let autopilotActive = false;
       try {
-        const autoRes = await api.get<any>(`/websites/${website.id}/autopilot/status`);
-        if (autoRes.success && autoRes.data) {
-          autopilotActive = !!autoRes.data.is_enabled;
+        const autoRes = await api.get<any[]>(`/websites/${website.id}/automation/rules`);
+        if (autoRes.success && Array.isArray(autoRes.data)) {
+          autopilotActive = autoRes.data.some((r) => r.status === 'active');
         }
       } catch {
         // Ignored
@@ -152,8 +183,12 @@ export function OverviewView({
         pendingApprovals,
         topRecommendation,
         gscConnected,
+        gscProperty,
         searchImpressions,
         searchClicks,
+        liveVisitorsNow,
+        livePageviews24h,
+        liveTrackerActive,
         autopilotActive,
       });
     } catch {
@@ -219,6 +254,18 @@ export function OverviewView({
         </div>
 
         <div className="flex items-center gap-2.5 shrink-0">
+          <button
+            onClick={() => onNavigate('live_traffic')}
+            className="inline-flex items-center gap-2 px-3.5 py-2.5 bg-zinc-900/90 hover:bg-zinc-800 border border-emerald-500/30 text-emerald-400 font-semibold rounded-xl text-xs transition"
+            title="Open Real-Time Live Traffic & Country/Region Analytics"
+          >
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+            <span>
+              {stats.liveTrackerActive
+                ? `${stats.liveVisitorsNow} Live Now`
+                : 'Live Traffic'}
+            </span>
+          </button>
           <button
             onClick={fetchOverviewData}
             disabled={isLoading}
@@ -401,22 +448,29 @@ export function OverviewView({
           </p>
         </div>
 
-        {/* Metric 4: Search Performance / GSC */}
+        {/* Metric 4: Search Performance / GSC + Live Traffic */}
         <div
           onClick={() => onNavigate('performance')}
           className="cursor-pointer bg-zinc-900/60 hover:bg-zinc-900/90 border border-zinc-800 hover:border-zinc-700/80 rounded-2xl p-5 transition group"
         >
           <div className="flex items-center justify-between mb-3">
-            <span className="text-xs font-medium text-zinc-400">Google Search Traffic</span>
+            <span className="text-xs font-medium text-zinc-400 flex items-center gap-1.5">
+              <span>Google Search Traffic</span>
+              {stats.gscConnected && (
+                <span className="text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                  Connected
+                </span>
+              )}
+            </span>
             <div className="w-8 h-8 rounded-lg bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-400">
               <BarChart3 className="w-4 h-4" />
             </div>
           </div>
           <div className="flex items-baseline gap-2 mb-1">
-            {stats.gscConnected && stats.searchClicks !== null ? (
+            {stats.gscConnected ? (
               <>
                 <span className="text-2xl font-black text-zinc-100 font-mono">
-                  {stats.searchClicks.toLocaleString()}
+                  {(stats.searchClicks ?? 0).toLocaleString()}
                 </span>
                 <span className="text-[11px] text-emerald-400">clicks / 28d</span>
               </>
@@ -427,7 +481,11 @@ export function OverviewView({
             )}
           </div>
           <p className="text-[11px] text-zinc-400 flex items-center justify-between">
-            <span>{stats.gscConnected ? `${stats.searchImpressions?.toLocaleString() ?? 0} impressions` : 'Connect Search Console'}</span>
+            <span>
+              {stats.gscConnected
+                ? `${(stats.searchImpressions ?? 0).toLocaleString()} impressions${stats.liveTrackerActive ? ` • ${stats.liveVisitorsNow} live` : ''}`
+                : 'Connect Search Console'}
+            </span>
             <span className="group-hover:text-sky-400 transition-colors flex items-center gap-0.5">
               Explore <ChevronRight className="w-3 h-3" />
             </span>

@@ -47,6 +47,7 @@ class Website extends Model
         'connection_status',
         'verification_status',
         'verification_token',
+        'tracking_token',
         'verification_method',
         'verified_at',
         'last_crawled_at',
@@ -70,6 +71,9 @@ class Website extends Model
         static::creating(function (Website $website) {
             if (empty($website->verification_token)) {
                 $website->verification_token = 'web-seo-ai-' . Str::random(32);
+            }
+            if (empty($website->tracking_token)) {
+                $website->tracking_token = 'wsa_' . Str::random(28);
             }
         });
     }
@@ -180,6 +184,21 @@ class Website extends Model
         }
 
         return $this->verification_token;
+    }
+
+    public function ensureTrackingToken(): string
+    {
+        if (empty($this->tracking_token)) {
+            $this->tracking_token = 'wsa_' . Str::random(28);
+            $this->save();
+        }
+
+        return $this->tracking_token;
+    }
+
+    public function trafficEvents(): HasMany
+    {
+        return $this->hasMany(WebsiteTrafficEvent::class);
     }
 
     /**

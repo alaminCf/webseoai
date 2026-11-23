@@ -319,10 +319,11 @@ export default function DashboardPage() {
             <ContentStudioView website={selectedWebsite} />
           )}
 
-          {/* SECTION 6: PERFORMANCE */}
-          {activeTab === 'performance' && (
+          {/* SECTION 6: PERFORMANCE & LIVE TRAFFIC */}
+          {(activeTab === 'performance' || activeTab === 'live_traffic') && (
             <UnifiedPerformanceView
               website={selectedWebsite}
+              initialSubTab={activeTab === 'live_traffic' ? 'live' : 'gsc'}
               onNavigateToContent={() => setActiveTab('content')}
             />
           )}
