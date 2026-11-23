@@ -45,6 +45,7 @@ class RankCheckerController extends Controller
             'depth' => ['nullable', 'integer', Rule::in([20, 30, 50, 100])],
             'monitor' => ['nullable', 'boolean'],
             'force_refresh' => ['nullable', 'boolean'],
+            'stop_when_found' => ['nullable', 'boolean'],
         ]);
 
         $res = $this->rankCheckerService->checkRank(
@@ -54,9 +55,10 @@ class RankCheckerController extends Controller
             $validated['language'] ?? ($website->preferred_language ?: 'en'),
             $validated['device'] ?? 'desktop',
             $validated['location'] ?? null,
-            (int) ($validated['depth'] ?? 50),
+            (int) ($validated['depth'] ?? 100),
             (bool) ($validated['monitor'] ?? false),
-            array_key_exists('force_refresh', $validated) ? (bool) $validated['force_refresh'] : true
+            array_key_exists('force_refresh', $validated) ? (bool) $validated['force_refresh'] : true,
+            array_key_exists('stop_when_found', $validated) ? (bool) $validated['stop_when_found'] : true
         );
 
         if (!($res['available'] ?? false)) {

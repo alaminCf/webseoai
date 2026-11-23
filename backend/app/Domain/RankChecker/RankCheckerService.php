@@ -195,9 +195,10 @@ class RankCheckerService
         string $language = 'en',
         string $device = 'desktop',
         ?string $location = null,
-        int $depth = 50,
+        int $depth = 100,
         bool $monitor = false,
-        bool $forceRefresh = true
+        bool $forceRefresh = true,
+        bool $stopWhenFound = true
     ): array {
         $keyword = trim($keyword);
         $country = CountryCatalog::normalizeCodes([$country], $website->target_country ?: 'US', 1)[0];
@@ -206,7 +207,8 @@ class RankCheckerService
         $device = strtolower(trim($device)) === 'mobile' ? 'mobile' : 'desktop';
         $cleanLocation = trim((string) ($location ?? ''));
         $effectiveLocation = $cleanLocation !== '' ? $cleanLocation : $countryName;
-        $depth = in_array($depth, [20, 30, 50, 100], true) ? $depth : 50;
+        $depth = in_array($depth, [20, 30, 50, 100], true) ? $depth : 100;
+        $targetDomain = CompetitorDomain::normalizeDomain($website->domain);
 
         $provider = $this->providerManager->resolveForCapability('serp', $website->organization_id);
         if ($provider->getName() === 'first_party_crawl') {
@@ -217,15 +219,16 @@ class RankCheckerService
             ];
         }
 
-        $cacheKey = "{$provider->getName()}:rankcheck:{$keyword}:{$country}:{$language}:{$device}:{$effectiveLocation}:{$depth}";
+        $stopDomainArg = $stopWhenFound ? $targetDomain : null;
+        $cacheKey = "{$provider->getName()}:rankcheck:{$keyword}:{$country}:{$language}:{$device}:{$effectiveLocation}:{$depth}:" . ($stopWhenFound ? 'auto' : 'full');
         $res = $this->providerManager->cachedCall(
             $website,
             'serp',
             $cacheKey,
             "rank_check:{$keyword}:{$country}",
-            function () use ($provider, $keyword, $country, $language, $device, $effectiveLocation, $depth) {
+            function () use ($provider, $keyword, $country, $language, $device, $effectiveLocation, $depth, $stopDomainArg) {
                 if ($provider instanceof SerperProvider) {
-                    return $provider->fetchSerp($keyword, $country, $language, $device, $effectiveLocation, $depth);
+                    return $provider->fetchSerp($keyword, $country, $language, $device, $effectiveLocation, $depth, $stopDomainArg);
                 }
                 return $provider->fetchSerp($keyword, $country, $language, $device, $effectiveLocation);
             },
@@ -240,7 +243,6 @@ class RankCheckerService
             ];
         }
 
-        $targetDomain = CompetitorDomain::normalizeDomain($website->domain);
         $websiteNameLower = strtolower(trim((string) $website->name));
         $competitors = CompetitorDomain::where('website_id', $website->id)
             ->where('is_active', true)
@@ -256,8 +258,8 @@ class RankCheckerService
         foreach ($res['organic_results'] ?? [] as $idx => $row) {
             $domain = CompetitorDomain::normalizeDomain((string) ($row['domain'] ?? ($row['url'] ?? '')));
             $pos = (int) ($row['position'] ?? ($idx + 1));
-            $googlePage = (int) ceil($pos / 10);
-            $rankOnPage = (($pos - 1) % 10) + 1;
+            $googlePage = (int) ($row['google_page'] ?? ceil($pos / 10));
+            $rankOnPage = (int) ($row['rank_on_page'] ?? ((($pos - 1) % 10) + 1));
 
             $isTarget = $domain !== '' && ($domain === $targetDomain || str_ends_with($domain, '.' . $targetDomain));
             $compModel = $competitors->get($domain);
@@ -281,12 +283,14 @@ class RankCheckerService
             if (!isset($pagesSummary[$googlePage])) {
                 $pagesSummary[$googlePage] = [
                     'page' => $googlePage,
-                    'range_start' => (($googlePage - 1) * 10) + 1,
-                    'range_end' => $googlePage * 10,
+                    'range_start' => $pos,
+                    'range_end' => $pos,
                     'results_count' => 0,
                     'has_target' => false,
                     'target_positions' => [],
                 ];
+            } else {
+                $pagesSummary[$googlePage]['range_end'] = max($pagesSummary[$googlePage]['range_end'], $pos);
             }
             $pagesSummary[$googlePage]['results_count']++;
 
@@ -319,7 +323,8 @@ class RankCheckerService
         }
 
         // Cross-check with verified 28-day Google Search Console Avg Position for this exact keyword
-        $gscComparison = $this->buildGscComparison($website, $keyword, $targetPosition, $countryName, $effectiveLocation, $depth);
+        $checkedCount = max(count($annotatedResults), 10);
+        $gscComparison = $this->buildGscComparison($website, $keyword, $targetPosition, $countryName, $effectiveLocation, $checkedCount);
 
         // Persist snapshot in competitor_serp_snapshots for rank history & delta tracking
         $extras = [
@@ -373,6 +378,10 @@ class RankCheckerService
             'pws' => '0',
         ]);
 
+        $primaryMatch = $targetMatches[0] ?? null;
+        $targetGooglePage = $primaryMatch ? (int) $primaryMatch['google_page'] : ($targetPosition ? (int) ceil($targetPosition / 10) : null);
+        $targetRankOnPage = $primaryMatch ? (int) $primaryMatch['rank_on_page'] : ($targetPosition ? ((($targetPosition - 1) % 10) + 1) : null);
+
         return [
             'available' => true,
             'snapshot_id' => $snapshot->id,
@@ -393,9 +402,9 @@ class RankCheckerService
             'target_ranking' => [
                 'found' => $targetPosition !== null,
                 'position' => $targetPosition,
-                'google_page' => $targetPosition ? (int) ceil($targetPosition / 10) : null,
-                'rank_on_page' => $targetPosition ? ((($targetPosition - 1) % 10) + 1) : null,
-                'primary_match' => $targetMatches[0] ?? null,
+                'google_page' => $targetGooglePage,
+                'rank_on_page' => $targetRankOnPage,
+                'primary_match' => $primaryMatch,
                 'all_matches' => $targetMatches,
                 'in_local_pack' => $localPackMatch !== null,
                 'local_pack_position' => $localPackMatch['position'] ?? null,

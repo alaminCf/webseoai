@@ -276,8 +276,15 @@ class SerperProvider implements CompetitorProviderInterface
         return ['available' => false, 'provider' => $this->getName(), 'summary' => [], 'backlinks' => [], 'error' => 'Serper.dev does not provide backlink datasets.'];
     }
 
-    public function fetchSerp(string $keyword, string $country = 'US', string $language = 'en', string $device = 'desktop', ?string $location = null, int $depth = 20): array
-    {
+    public function fetchSerp(
+        string $keyword,
+        string $country = 'US',
+        string $language = 'en',
+        string $device = 'desktop',
+        ?string $location = null,
+        int $depth = 20,
+        ?string $stopWhenDomainFound = null
+    ): array {
         if (!$this->isConfigured()) {
             return ['available' => false, 'provider' => $this->getName(), 'serp_features' => [], 'organic_results' => [], 'error' => 'SERPER_API_KEY is not configured.'];
         }
@@ -285,54 +292,173 @@ class SerperProvider implements CompetitorProviderInterface
         try {
             $gl = CountryCatalog::gl($country);
             $geoLocation = trim((string) ($location ?? '')) ?: CountryCatalog::serperLocation($country);
-            $num = max(10, min(100, $depth));
-            $payload = [
+            $targetDepth = max(10, min(100, $depth));
+            $maxPages = (int) ceil($targetDepth / 10);
+            $normStopDomain = $stopWhenDomainFound
+                ? preg_replace('/^www\./i', '', strtolower(trim($stopWhenDomainFound)))
+                : null;
+
+            $basePayload = [
                 'q' => $keyword,
                 'gl' => $gl,
                 'hl' => strtolower($language),
-                'num' => $num,
+                'num' => 10,
             ];
             if ($geoLocation !== '') {
-                $payload['location'] = $geoLocation;
+                $basePayload['location'] = $geoLocation;
+            }
+            if (strtolower($device) === 'mobile') {
+                $basePayload['device'] = 'mobile';
             }
 
-            $res = Http::withHeaders([
+            // Step 1: Always fetch Google Page 1 first (returns organic #1-#10 + Local Pack + PAA + Answer Box)
+            $page1Payload = array_merge($basePayload, ['page' => 1]);
+            $res1 = Http::withHeaders([
                 'X-API-KEY' => $this->apiKey,
                 'Content-Type' => 'application/json',
-            ])->timeout($this->timeout)->post("{$this->baseUrl}/search", $payload);
+            ])->timeout($this->timeout)->post("{$this->baseUrl}/search", $page1Payload);
 
-            if (!$res->successful()) {
-                return ['available' => false, 'provider' => $this->getName(), 'serp_features' => [], 'organic_results' => [], 'http_status' => $res->status(), 'error' => 'Serper.dev request failed (HTTP ' . $res->status() . ')'];
+            if (!$res1->successful()) {
+                return ['available' => false, 'provider' => $this->getName(), 'serp_features' => [], 'organic_results' => [], 'http_status' => $res1->status(), 'error' => 'Serper.dev request failed (HTTP ' . $res1->status() . ')'];
             }
 
-            $json = $res->json() ?? [];
+            $json1 = $res1->json() ?? [];
+            $pagesRaw = [1 => $json1];
+            $pagesFetched = 1;
+
+            $page1OrganicCount = count($json1['organic'] ?? []);
+            $domainMatchesPage = function (array $pageJson) use ($normStopDomain): bool {
+                if (!$normStopDomain) {
+                    return false;
+                }
+                foreach ($pageJson['organic'] ?? [] as $item) {
+                    $host = preg_replace('/^www\./i', '', strtolower((string) parse_url((string) ($item['link'] ?? ''), PHP_URL_HOST)));
+                    if ($host !== '' && ($host === $normStopDomain || str_ends_with($host, '.' . $normStopDomain))) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            $foundTargetPage = $domainMatchesPage($json1) ? 1 : null;
+
+            // Step 2: Google caps Page 1 at ~10 results. Paginate Pages 2..$maxPages in fast parallel waves
+            // so we find deep rankings (e.g. #25, #48, #73) and return the full continuous list down to the target!
+            if ($maxPages > 1 && $page1OrganicCount > 0 && $page1OrganicCount <= 12 && $foundTargetPage === null) {
+                $waves = [];
+                if ($maxPages >= 2) {
+                    $waves[] = range(2, min(5, $maxPages));
+                }
+                if ($maxPages >= 6) {
+                    $waves[] = range(6, min(10, $maxPages));
+                }
+
+                foreach ($waves as $wavePages) {
+                    $poolResponses = Http::pool(function ($pool) use ($wavePages, $basePayload) {
+                        foreach ($wavePages as $pg) {
+                            $pool->as("p{$pg}")
+                                ->withHeaders([
+                                    'X-API-KEY' => $this->apiKey,
+                                    'Content-Type' => 'application/json',
+                                ])
+                                ->timeout($this->timeout)
+                                ->post("{$this->baseUrl}/search", array_merge($basePayload, ['page' => $pg]));
+                        }
+                    });
+
+                    $waveHadResults = false;
+                    foreach ($wavePages as $pg) {
+                        $resp = $poolResponses["p{$pg}"] ?? null;
+                        if ($resp && !($resp instanceof Throwable) && $resp->successful()) {
+                            $pJson = $resp->json() ?? [];
+                            if (!empty($pJson['organic'])) {
+                                $pagesRaw[$pg] = $pJson;
+                                $pagesFetched++;
+                                $waveHadResults = true;
+                                if ($foundTargetPage === null && $domainMatchesPage($pJson)) {
+                                    $foundTargetPage = $pg;
+                                }
+                            }
+                        }
+                    }
+
+                    // Stop immediately once we found the target domain's Google page (saves credits & latency)
+                    // or if Google returned no further pages
+                    if ($foundTargetPage !== null || !$waveHadResults) {
+                        break;
+                    }
+                }
+            }
+
+            // If we found the target domain in a wave (e.g. Page 3 inside Wave 2-5), trim pages AFTER that page
+            // when stopWhenDomainFound is active so the list runs cleanly from #1 straight down through the target's page
+            if ($normStopDomain !== null && $foundTargetPage !== null) {
+                ksort($pagesRaw);
+                $pagesRaw = array_filter(
+                    $pagesRaw,
+                    fn (int $pg) => $pg <= $foundTargetPage,
+                    ARRAY_FILTER_USE_KEY
+                );
+            } else {
+                ksort($pagesRaw);
+            }
+
             $features = [];
             foreach (['answerBox' => 'featured_snippet', 'peopleAlsoAsk' => 'people_also_ask', 'places' => 'local_pack', 'knowledgeGraph' => 'knowledge_panel', 'shopping' => 'shopping', 'videos' => 'video_carousel', 'topStories' => 'top_stories'] as $k => $label) {
-                if (!empty($json[$k])) {
+                if (!empty($json1[$k])) {
                     $features[] = $label;
                 }
             }
 
+            // Build deduplicated continuous organic results (#1..#100) preserving exact Google Page & rank on page
             $organic = [];
-            foreach ($json['organic'] ?? [] as $idx => $item) {
-                $url = (string) ($item['link'] ?? '');
-                $host = preg_replace('/^www\./i', '', strtolower((string) parse_url($url, PHP_URL_HOST)));
-                $pos = (int) ($item['position'] ?? ($idx + 1));
-                $organic[] = [
-                    'position' => $pos,
-                    'google_page' => (int) ceil($pos / 10),
-                    'rank_on_page' => (($pos - 1) % 10) + 1,
-                    'domain' => $host,
-                    'url' => $url,
-                    'title' => (string) ($item['title'] ?? ''),
-                    'snippet' => (string) ($item['snippet'] ?? ''),
-                    'date' => $item['date'] ?? null,
-                    'sitelinks' => array_slice(is_array($item['sitelinks'] ?? null) ? $item['sitelinks'] : [], 0, 4),
-                ];
+            $seenUrls = [];
+            $globalPos = 0;
+            $isMultiPage = count($pagesRaw) > 1;
+
+            foreach ($pagesRaw as $pgNum => $pgJson) {
+                $rankOnThisPage = 0;
+                foreach ($pgJson['organic'] ?? [] as $idx => $item) {
+                    $url = trim((string) ($item['link'] ?? ''));
+                    if ($url === '') {
+                        continue;
+                    }
+                    $urlKey = rtrim(strtolower($url), '/');
+                    if (isset($seenUrls[$urlKey])) {
+                        continue;
+                    }
+                    $seenUrls[$urlKey] = true;
+
+                    $globalPos++;
+                    $rankOnThisPage++;
+                    $host = preg_replace('/^www\./i', '', strtolower((string) parse_url($url, PHP_URL_HOST)));
+
+                    if ($isMultiPage) {
+                        $pos = $globalPos;
+                        $googlePage = (int) $pgNum;
+                        $rankOnPage = $rankOnThisPage;
+                    } else {
+                        $pos = (int) ($item['position'] ?? $globalPos);
+                        $googlePage = (int) ceil($pos / 10);
+                        $rankOnPage = (($pos - 1) % 10) + 1;
+                    }
+
+                    $organic[] = [
+                        'position' => $pos,
+                        'google_page' => $googlePage,
+                        'rank_on_page' => $rankOnPage,
+                        'domain' => $host,
+                        'url' => $url,
+                        'title' => (string) ($item['title'] ?? ''),
+                        'snippet' => (string) ($item['snippet'] ?? ''),
+                        'date' => $item['date'] ?? null,
+                        'sitelinks' => array_slice(is_array($item['sitelinks'] ?? null) ? $item['sitelinks'] : [], 0, 4),
+                    ];
+                }
             }
 
             $places = [];
-            foreach ($json['places'] ?? [] as $pIdx => $pl) {
+            foreach ($json1['places'] ?? [] as $pIdx => $pl) {
                 $places[] = [
                     'position' => (int) ($pl['position'] ?? ($pIdx + 1)),
                     'title' => (string) ($pl['title'] ?? ''),
@@ -345,7 +471,7 @@ class SerperProvider implements CompetitorProviderInterface
             }
 
             $paa = [];
-            foreach ($json['peopleAlsoAsk'] ?? [] as $q) {
+            foreach ($json1['peopleAlsoAsk'] ?? [] as $q) {
                 $paa[] = [
                     'question' => (string) ($q['question'] ?? ''),
                     'snippet' => (string) ($q['snippet'] ?? ''),
@@ -355,7 +481,7 @@ class SerperProvider implements CompetitorProviderInterface
             }
 
             $related = [];
-            foreach ($json['relatedSearches'] ?? [] as $r) {
+            foreach ($json1['relatedSearches'] ?? [] as $r) {
                 if (!empty($r['query'])) {
                     $related[] = (string) $r['query'];
                 }
@@ -364,20 +490,23 @@ class SerperProvider implements CompetitorProviderInterface
             return [
                 'available' => true,
                 'provider' => $this->getName(),
-                'http_status' => $res->status(),
-                'cost_usd' => $num > 10 ? 0.002 : 0.001,
+                'http_status' => $res1->status(),
+                'cost_usd' => round($pagesFetched * 0.001, 4),
+                'pages_fetched' => $pagesFetched,
                 'serp_features' => $features,
                 'organic_results' => $organic,
                 'local_pack' => $places,
                 'people_also_ask' => $paa,
                 'related_searches' => $related,
-                'answer_box' => $json['answerBox'] ?? null,
+                'answer_box' => $json1['answerBox'] ?? null,
                 'search_parameters' => [
                     'q' => $keyword,
                     'gl' => $gl,
                     'hl' => strtolower($language),
                     'location' => $geoLocation,
-                    'num' => $num,
+                    'device' => $device,
+                    'depth' => $targetDepth,
+                    'pages_fetched' => $pagesFetched,
                 ],
             ];
         } catch (Throwable $e) {

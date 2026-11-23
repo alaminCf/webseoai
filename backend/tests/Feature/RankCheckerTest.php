@@ -109,7 +109,8 @@ class RankCheckerTest extends TestCase
                 $payload = $request->data();
                 $this->assertEquals('sg', $payload['gl']);
                 $this->assertEquals('Singapore', $payload['location']);
-                $this->assertEquals(50, $payload['num']);
+                $this->assertEquals(10, $payload['num']);
+                $this->assertEquals(1, $payload['page']);
 
                 return Http::response([
                     'organic' => $organic,
@@ -260,5 +261,78 @@ class RankCheckerTest extends TestCase
             ->assertStatus(201)
             ->assertJsonPath('data.target_ranking.position', 2)
             ->assertJsonPath('data.target_ranking.google_page', 1);
+    }
+
+    public function test_live_rank_checker_paginates_across_google_pages_to_find_deep_position_48(): void
+    {
+        config([
+            'competitors.providers.dataforseo.login' => '',
+            'competitors.providers.dataforseo.password' => '',
+            'competitors.providers.serpapi.api_key' => '',
+            'competitors.providers.serper.api_key' => 'test_serper_pagination_key',
+        ]);
+
+        $user = User::factory()->create();
+        $org = Organization::create(['name' => 'Deep Rank Org', 'slug' => 'deep-rank-org', 'owner_id' => $user->id]);
+        OrganizationMember::create(['organization_id' => $org->id, 'user_id' => $user->id, 'role' => OrganizationMember::ROLE_SEO_MANAGER]);
+
+        $website = Website::create([
+            'organization_id' => $org->id,
+            'name' => 'Handyman Super Services',
+            'domain' => 'handymansuperservices.com',
+            'target_url' => 'https://handymansuperservices.com',
+            'platform' => Website::PLATFORM_WORDPRESS,
+            'target_country' => 'SG',
+            'preferred_language' => 'en',
+        ]);
+
+        // Simulate real Serper.dev 10-results-per-page Google pagination where target ranks #8 on Page 5 (global #48)
+        Http::fake([
+            'https://google.serper.dev/search' => function (\Illuminate\Http\Client\Request $req) {
+                $pg = (int) ($req['page'] ?? 1);
+                $items = [];
+                for ($i = 1; $i <= 10; $i++) {
+                    $globalIdx = (($pg - 1) * 10) + $i;
+                    if ($pg === 5 && $i === 8) {
+                        $items[] = [
+                            'position' => $i,
+                            'link' => 'https://handymansuperservices.com/emergency-plumber-singapore/',
+                            'title' => '24Hr Emergency Plumber Singapore | Handyman Super Services',
+                            'snippet' => 'Fast 24/7 emergency plumbing repair across Singapore.',
+                        ];
+                    } else {
+                        $items[] = [
+                            'position' => $i,
+                            'link' => "https://sg-plumber-{$globalIdx}.sg/service",
+                            'title' => "SG Plumber #{$globalIdx}",
+                            'snippet' => 'Singapore plumbing service.',
+                        ];
+                    }
+                }
+                return Http::response(['organic' => $items], 200);
+            },
+        ]);
+
+        $res = $this->actingAs($user)
+            ->withHeaders(['X-Organization-Id' => (string) $org->id])
+            ->postJson("/api/v1/websites/{$website->id}/rank-checker/check", [
+                'keyword' => 'emergency plumber singapore',
+                'country' => 'SG',
+                'device' => 'desktop',
+                'depth' => 100,
+                'stop_when_found' => true,
+            ]);
+
+        $res->assertStatus(201)
+            ->assertJsonPath('data.target_ranking.found', true)
+            ->assertJsonPath('data.target_ranking.position', 48)
+            ->assertJsonPath('data.target_ranking.google_page', 5)
+            ->assertJsonPath('data.target_ranking.rank_on_page', 8)
+            ->assertJsonPath('data.results_returned', 50);
+
+        // Must have all 5 Google Pages (#1..#50), stopping right after Page 5 (zero wasted requests on Pages 6-10)
+        $this->assertCount(5, $res->json('data.pages_summary'));
+        $this->assertTrue($res->json('data.pages_summary.4.has_target'));
+        Http::assertSentCount(5);
     }
 }

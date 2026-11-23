@@ -209,7 +209,7 @@ export function RankCheckerView({
   const [location, setLocation] = useState<string>('');
   const [language, setLanguage] = useState<string>('en');
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop');
-  const [depth, setDepth] = useState<number>(50);
+  const [depth, setDepth] = useState<number>(100);
   const [forceRefresh, setForceRefresh] = useState<boolean>(true);
 
   // Searchable country dropdown
@@ -232,8 +232,8 @@ export function RankCheckerView({
   const [isSavingKey, setIsSavingKey] = useState<boolean>(false);
   const [isRemovingKey, setIsRemovingKey] = useState<boolean>(false);
 
-  // SERP pagination & filter
-  const [selectedPage, setSelectedPage] = useState<number | 'all'>(1);
+  // SERP pagination & filter (default 'all' so full list #1 -> target position is always visible)
+  const [selectedPage, setSelectedPage] = useState<number | 'all'>('all');
   const [serpSearch, setSerpSearch] = useState<string>('');
   const [expandedPaaIdx, setExpandedPaaIdx] = useState<number | null>(null);
 
@@ -254,22 +254,30 @@ export function RankCheckerView({
     setResult(null);
     setErrorMessage(null);
     try {
-      const saved = localStorage.getItem(`wsa_rank_geo_${website.id}`);
+      const saved = localStorage.getItem(`wsa_rank_geo_v2_${website.id}`) || localStorage.getItem(`wsa_rank_geo_${website.id}`);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed.country) setCountry(parsed.country);
         if (typeof parsed.location === 'string') setLocation(parsed.location);
         if (parsed.language) setLanguage(parsed.language);
         if (parsed.device === 'mobile' || parsed.device === 'desktop') setDevice(parsed.device);
-        if ([20, 30, 50, 100].includes(parsed.depth)) setDepth(parsed.depth);
+        // Upgrade legacy default 50 to 100 auto-find if from v1 key
+        const isV2 = Boolean(localStorage.getItem(`wsa_rank_geo_v2_${website.id}`));
+        if (isV2 && [30, 50, 100].includes(parsed.depth)) {
+          setDepth(parsed.depth);
+        } else {
+          setDepth(100);
+        }
       } else {
         setCountry((website.target_country || 'US').toUpperCase());
         setLocation('');
         setLanguage((website.preferred_language || 'en').toLowerCase());
+        setDepth(100);
       }
     } catch {
       setCountry((website.target_country || 'US').toUpperCase());
       setLocation('');
+      setDepth(100);
     }
   }, [website]);
 
@@ -278,7 +286,7 @@ export function RankCheckerView({
     if (!website) return;
     try {
       localStorage.setItem(
-        `wsa_rank_geo_${website.id}`,
+        `wsa_rank_geo_v2_${website.id}`,
         JSON.stringify({ country, location, language, device, depth })
       );
     } catch {
@@ -349,13 +357,13 @@ export function RankCheckerView({
           device: useDevice,
           depth: useDepth,
           force_refresh: useForce,
+          stop_when_found: true,
         });
 
         if (res.success && res.data) {
           setResult(res.data);
-          // Automatically focus the Google Page where the site ranks (or Page 1 if not found)
-          const foundPage = res.data.target_ranking?.google_page;
-          setSelectedPage(foundPage ?? 1);
+          // Show full continuous list from #1 down through the target's ranking page
+          setSelectedPage('all');
 
           if (res.data.target_ranking?.found) {
             toast.success(
@@ -457,7 +465,7 @@ export function RankCheckerView({
         setCountry(res.data.country);
         setLocation(res.data.location === res.data.country_name ? '' : res.data.location);
         setDevice(res.data.device);
-        setSelectedPage(res.data.target_ranking?.google_page ?? 1);
+        setSelectedPage('all');
       } else {
         toast.error(res.error?.message || 'Failed to load saved SERP snapshot.');
       }
@@ -468,7 +476,10 @@ export function RankCheckerView({
 
   const jumpToPosition = (pos: number, googlePage: number) => {
     setSerpSearch('');
-    setSelectedPage(googlePage);
+    // Keep 'all' view if already showing all results, otherwise switch to that page
+    if (selectedPage !== 'all' && selectedPage !== googlePage) {
+      setSelectedPage(googlePage);
+    }
     setTimeout(() => {
       const el = document.getElementById(`serp-row-${pos}`);
       if (el) {
@@ -884,14 +895,14 @@ export function RankCheckerView({
                   onChange={(e) => setDepth(parseInt(e.target.value, 10))}
                   className="bg-transparent text-zinc-200 font-medium focus:outline-none"
                 >
-                  <option value={30} className="bg-zinc-900 text-zinc-100">
-                    Top 30 (Pages 1–3)
+                  <option value={100} className="bg-zinc-900 text-zinc-100">
+                    Auto-Find Top 100 (Pages 1–10)
                   </option>
                   <option value={50} className="bg-zinc-900 text-zinc-100">
-                    Top 50 (Pages 1–5)
+                    Up to Top 50 (Pages 1–5)
                   </option>
-                  <option value={100} className="bg-zinc-900 text-zinc-100">
-                    Top 100 (Pages 1–10)
+                  <option value={30} className="bg-zinc-900 text-zinc-100">
+                    Up to Top 30 (Pages 1–3)
                   </option>
                 </select>
               </div>
@@ -1047,14 +1058,21 @@ export function RankCheckerView({
                   <div className="space-y-1.5 min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
                       {result.target_ranking.found ? (
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-bold">
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          Google Page {result.target_ranking.google_page} • #{result.target_ranking.rank_on_page} on Page
-                        </span>
+                        <>
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-xs font-bold">
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            Google Page {result.target_ranking.google_page} • #{result.target_ranking.rank_on_page} on Page
+                          </span>
+                          {result.target_ranking.position && result.target_ranking.position > 10 && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 text-[11px] font-semibold">
+                              Outside Top 10 • {result.target_ranking.position - 10} spots below Page 1
+                            </span>
+                          )}
+                        </>
                       ) : (
                         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-bold">
                           <AlertTriangle className="w-3.5 h-3.5" />
-                          Not ranked in Top {result.results_returned} (Pages 1–{Math.ceil(result.results_returned / 10)})
+                          Not ranked in Top {result.results_returned} (Pages 1–{Math.max(1, result.pages_summary.length)})
                         </span>
                       )}
 
@@ -1351,7 +1369,7 @@ export function RankCheckerView({
                         : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-zinc-200'
                     }`}
                   >
-                    All ({result.organic_results.length})
+                    All (#1–#{result.organic_results.length})
                   </button>
                   {result.pages_summary.map((pg) => {
                     const active = selectedPage === pg.page;
@@ -1383,6 +1401,23 @@ export function RankCheckerView({
                       </button>
                     );
                   })}
+                  {result.target_ranking.found &&
+                    result.target_ranking.position &&
+                    result.target_ranking.google_page && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          jumpToPosition(
+                            result.target_ranking.position!,
+                            result.target_ranking.google_page!
+                          )
+                        }
+                        className="ml-auto inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 text-xs font-bold transition"
+                      >
+                        <ArrowDownCircle className="w-3.5 h-3.5" />
+                        Your Site (#{result.target_ranking.position})
+                      </button>
+                    )}
                 </div>
               </div>
 
@@ -1419,96 +1454,122 @@ export function RankCheckerView({
                     No organic results match this page/filter.
                   </div>
                 ) : (
-                  displayedOrganicResults.map((row) => (
-                    <div
-                      key={`${row.position}-${row.url}`}
-                      id={`serp-row-${row.position}`}
-                      className={`p-4 transition ${
-                        row.is_target
-                          ? 'bg-emerald-500/[0.08] border-l-4 border-l-emerald-400'
-                          : row.is_competitor
-                          ? 'bg-sky-500/[0.05] border-l-4 border-l-sky-400'
-                          : 'hover:bg-zinc-900/40'
-                      }`}
-                    >
-                      <div className="flex items-start gap-3.5">
-                        {/* Position + Page Badge */}
-                        <div className="flex flex-col items-center shrink-0 w-14 pt-0.5">
-                          <span
-                            className={`w-10 h-10 rounded-xl flex items-center justify-center font-mono text-sm font-black border ${
-                              row.is_target
-                                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50'
-                                : row.position <= 3
-                                ? 'bg-zinc-900 text-amber-300 border-amber-500/30'
-                                : 'bg-zinc-900 text-zinc-300 border-zinc-800'
+                  displayedOrganicResults.map((row, idx) => {
+                    const prevPage = idx > 0 ? displayedOrganicResults[idx - 1].google_page : null;
+                    const showPageDivider = selectedPage === 'all' && !serpSearch && row.google_page !== prevPage;
+                    const pageMeta = result.pages_summary.find((p) => p.page === row.google_page);
+
+                    return (
+                      <React.Fragment key={`${row.position}-${row.url}`}>
+                        {showPageDivider && (
+                          <div
+                            className={`px-4 py-2 flex items-center justify-between text-[11px] font-bold uppercase tracking-wider ${
+                              pageMeta?.has_target
+                                ? 'bg-emerald-950/50 text-emerald-300 border-y border-emerald-500/30'
+                                : 'bg-zinc-900/80 text-zinc-400'
                             }`}
                           >
-                            #{row.position}
-                          </span>
-                          <span className="text-[10px] text-zinc-500 font-mono mt-1">
-                            P{row.google_page} • #{row.rank_on_page}
-                          </span>
-                        </div>
-
-                        {/* Google Result Card Body */}
-                        <div className="min-w-0 flex-1 space-y-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-xs font-semibold text-zinc-300 truncate max-w-xs">
-                              {row.domain}
+                            <span>
+                              Google Page {row.google_page}
+                              {pageMeta ? ` (Positions #${pageMeta.range_start}–#${pageMeta.range_end})` : ''}
                             </span>
-                            {row.is_target && (
-                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                                Your Site
+                            {pageMeta?.has_target && (
+                              <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px]">
+                                Your Site Found: #{pageMeta.target_positions.join(', #')}
                               </span>
                             )}
-                            {row.is_competitor && (
-                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-sky-500/20 text-sky-300 border border-sky-500/40">
-                                Tracked Competitor
+                          </div>
+                        )}
+                        <div
+                          id={`serp-row-${row.position}`}
+                          className={`p-4 transition ${
+                            row.is_target
+                              ? 'bg-emerald-500/[0.08] border-l-4 border-l-emerald-400'
+                              : row.is_competitor
+                              ? 'bg-sky-500/[0.05] border-l-4 border-l-sky-400'
+                              : 'hover:bg-zinc-900/40'
+                          }`}
+                        >
+                          <div className="flex items-start gap-3.5">
+                            {/* Position + Page Badge */}
+                            <div className="flex flex-col items-center shrink-0 w-14 pt-0.5">
+                              <span
+                                className={`w-10 h-10 rounded-xl flex items-center justify-center font-mono text-sm font-black border ${
+                                  row.is_target
+                                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/50'
+                                    : row.position <= 3
+                                    ? 'bg-zinc-900 text-amber-300 border-amber-500/30'
+                                    : 'bg-zinc-900 text-zinc-300 border-zinc-800'
+                                }`}
+                              >
+                                #{row.position}
                               </span>
-                            )}
-                            {row.date && (
-                              <span className="text-[10px] text-zinc-500">{row.date}</span>
-                            )}
-                          </div>
-
-                          <div className="text-[11px] text-zinc-500 font-mono truncate">
-                            {row.url}
-                          </div>
-
-                          <a
-                            href={row.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className={`block text-sm sm:text-[15px] font-semibold leading-snug hover:underline ${
-                              row.is_target ? 'text-emerald-300' : 'text-blue-400'
-                            }`}
-                          >
-                            {row.title || row.url}
-                          </a>
-
-                          {row.snippet && (
-                            <p className="text-xs text-zinc-400 leading-relaxed">{row.snippet}</p>
-                          )}
-
-                          {row.sitelinks && row.sitelinks.length > 0 && (
-                            <div className="flex flex-wrap gap-2 pt-1">
-                              {row.sitelinks.slice(0, 4).map((sl, i) => (
-                                <a
-                                  key={i}
-                                  href={sl.link || row.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-[11px] text-blue-400/90 hover:underline bg-zinc-900/70 border border-zinc-800 px-2 py-0.5 rounded-md"
-                                >
-                                  {sl.title}
-                                </a>
-                              ))}
+                              <span className="text-[10px] text-zinc-500 font-mono mt-1">
+                                P{row.google_page} • #{row.rank_on_page}
+                              </span>
                             </div>
-                          )}
+
+                            {/* Google Result Card Body */}
+                            <div className="min-w-0 flex-1 space-y-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-xs font-semibold text-zinc-300 truncate max-w-xs">
+                                  {row.domain}
+                                </span>
+                                {row.is_target && (
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                                    Your Site
+                                  </span>
+                                )}
+                                {row.is_competitor && (
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-sky-500/20 text-sky-300 border border-sky-500/40">
+                                    Tracked Competitor
+                                  </span>
+                                )}
+                                {row.date && (
+                                  <span className="text-[10px] text-zinc-500">{row.date}</span>
+                                )}
+                              </div>
+
+                              <div className="text-[11px] text-zinc-500 font-mono truncate">
+                                {row.url}
+                              </div>
+
+                              <a
+                                href={row.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className={`block text-sm sm:text-[15px] font-semibold leading-snug hover:underline ${
+                                  row.is_target ? 'text-emerald-300' : 'text-blue-400'
+                                }`}
+                              >
+                                {row.title || row.url}
+                              </a>
+
+                              {row.snippet && (
+                                <p className="text-xs text-zinc-400 leading-relaxed">{row.snippet}</p>
+                              )}
+
+                              {row.sitelinks && row.sitelinks.length > 0 && (
+                                <div className="flex flex-wrap gap-2 pt-1">
+                                  {row.sitelinks.slice(0, 4).map((sl, i) => (
+                                    <a
+                                      key={i}
+                                      href={sl.link || row.url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="text-[11px] text-blue-400/90 hover:underline bg-zinc-900/70 border border-zinc-800 px-2 py-0.5 rounded-md"
+                                    >
+                                      {sl.title}
+                                    </a>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </div>
                         </div>
-                      </div>
-                    </div>
-                  ))
+                      </React.Fragment>
+                    );
+                  })
                 )}
               </div>
             </div>
