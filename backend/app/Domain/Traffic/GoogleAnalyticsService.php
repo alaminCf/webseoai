@@ -285,14 +285,13 @@ class GoogleAnalyticsService
         $rtUrl = "https://analyticsdata.googleapis.com/v1beta/properties/{$propertyId}:runRealtimeReport";
         $histUrl = "https://analyticsdata.googleapis.com/v1beta/properties/{$propertyId}:runReport";
 
-        // 1. GA4 Live Realtime Report (last 30 minutes) — Country, City, Page, Device
+        // 1. GA4 Live Realtime Report (last 30 minutes) — MAX 4 dimensions per GA4 Realtime API limit!
         $rtGeoRes = Http::withToken($accessToken)->timeout(12)->post($rtUrl, [
             'dimensions' => [
                 ['name' => 'country'],
                 ['name' => 'countryId'],
                 ['name' => 'city'],
                 ['name' => 'unifiedScreenName'],
-                ['name' => 'deviceCategory'],
             ],
             'metrics' => [
                 ['name' => 'activeUsers'],
@@ -313,7 +312,7 @@ class GoogleAnalyticsService
             ];
         }
 
-        // 2. GA4 Minute-by-Minute Realtime Timeline (last 30 mins) + 5-min Active Now count
+        // 2. GA4 Minute-by-Minute Realtime Timeline (last 30 mins) + Device Breakdown (<= 4 dimensions each)
         $rtMinRes = Http::withToken($accessToken)->timeout(10)->post($rtUrl, [
             'dimensions' => [['name' => 'minutesAgo']],
             'metrics' => [
@@ -321,6 +320,12 @@ class GoogleAnalyticsService
                 ['name' => 'screenPageViews'],
             ],
             'limit' => 35,
+        ]);
+
+        $rtDevRes = Http::withToken($accessToken)->timeout(10)->post($rtUrl, [
+            'dimensions' => [['name' => 'deviceCategory']],
+            'metrics' => [['name' => 'activeUsers']],
+            'limit' => 10,
         ]);
 
         $active5m = 0;
@@ -342,6 +347,12 @@ class GoogleAnalyticsService
         $rtCities = [];
         $rtPages = [];
         $rtDevices = ['desktop' => 0, 'mobile' => 0, 'tablet' => 0];
+        foreach ($rtDevRes->json('rows') ?? [] as $dRow) {
+            $devKey = strtolower((string) ($dRow['dimensionValues'][0]['value'] ?? 'desktop'));
+            if (isset($rtDevices[$devKey])) {
+                $rtDevices[$devKey] += (int) ($dRow['metricValues'][0]['value'] ?? 0);
+            }
+        }
         $liveFeed = [];
 
         foreach ($rtGeoRes->json('rows') ?? [] as $idx => $row) {
@@ -357,14 +368,10 @@ class GoogleAnalyticsService
                 $city = 'Unknown City';
             }
             $screen = (string) ($dims[3]['value'] ?? '/');
-            $dev = strtolower((string) ($dims[4]['value'] ?? 'desktop'));
             $u = (int) ($mets[0]['value'] ?? 0);
             $pv = (int) ($mets[1]['value'] ?? 0);
 
             $visitors30m += $u;
-            if (isset($rtDevices[$dev])) {
-                $rtDevices[$dev] += $u;
-            }
             $rtCountries[$cc] = ($rtCountries[$cc] ?? 0) + $u;
             $rtCities["{$cc}|{$city}"] = [
                 'country_code' => $cc,
@@ -393,7 +400,7 @@ class GoogleAnalyticsService
                     'region' => null,
                     'city' => $city,
                     'referrer_domain' => 'GA4 Realtime',
-                    'device_type' => $dev,
+                    'device_type' => 'desktop',
                     'browser' => 'GA4',
                     'os' => '',
                     'occurred_at' => now()->toIso8601String(),

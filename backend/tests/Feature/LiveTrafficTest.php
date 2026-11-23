@@ -124,21 +124,35 @@ class LiveTrafficTest extends TestCase
                 '<html><head><script async src="https://www.googletagmanager.com/gtag/js?id=G-ECMTVCJLZC"></script></head><body>Hi</body></html>',
                 200
             ),
-            'https://analyticsdata.googleapis.com/v1beta/properties/412345678:runRealtimeReport' => Http::response([
-                'rows' => [[
-                    'dimensionValues' => [
-                        ['value' => 'Singapore'],
-                        ['value' => 'SG'],
-                        ['value' => 'Singapore'],
-                        ['value' => '24Hr Handyman Services Singapore'],
-                        ['value' => 'mobile'],
-                    ],
-                    'metricValues' => [
-                        ['value' => '7'],
-                        ['value' => '14'],
-                    ],
-                ]],
-            ], 200),
+            'https://analyticsdata.googleapis.com/v1beta/properties/412345678:runRealtimeReport' => function ($request) {
+                $dims = $request->data()['dimensions'] ?? [];
+                // Enforce GA4 Realtime API's strict 4-dimension limit in our test suite!
+                if (count($dims) > 4) {
+                    return Http::response(['error' => ['message' => 'Requests are limited to 4 dimensions within a nested request.']], 400);
+                }
+                if (($dims[0]['name'] ?? '') === 'deviceCategory') {
+                    return Http::response([
+                        'rows' => [[
+                            'dimensionValues' => [['value' => 'mobile']],
+                            'metricValues' => [['value' => '7']],
+                        ]],
+                    ], 200);
+                }
+                return Http::response([
+                    'rows' => [[
+                        'dimensionValues' => [
+                            ['value' => 'Singapore'],
+                            ['value' => 'SG'],
+                            ['value' => 'Singapore'],
+                            ['value' => '24Hr Handyman Services Singapore'],
+                        ],
+                        'metricValues' => [
+                            ['value' => '7'],
+                            ['value' => '14'],
+                        ],
+                    ]],
+                ], 200);
+            },
             'https://analyticsdata.googleapis.com/v1beta/properties/412345678:runReport' => Http::response([
                 'rows' => [[
                     'dimensionValues' => [
