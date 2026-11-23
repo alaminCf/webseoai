@@ -3,6 +3,7 @@
 namespace App\Domain\Traffic;
 
 use App\Domain\Competitors\Support\CountryCatalog;
+use App\Domain\Crawler\UrlSecurityValidator;
 use App\Models\Website;
 use App\Models\WebsiteTrafficEvent;
 use Carbon\Carbon;
@@ -158,19 +159,115 @@ class LiveTrafficService
     }
 
     /**
-     * Record a live visitor event (pageview or heartbeat) using privacy-safe daily visitor hashing.
+     * Detect automated bots/crawlers so live traffic counts ONLY real human visitors.
      */
-    public function recordEvent(Website $website, Request $request, array $payload): WebsiteTrafficEvent
+    public function isBotUserAgent(?string $ua): bool
+    {
+        $lower = strtolower(trim((string) ($ua ?? '')));
+        if ($lower === '') {
+            return false;
+        }
+
+        foreach ([
+            'googlebot', 'bingbot', 'yandexbot', 'baiduspider', 'duckduckbot', 'slurp',
+            'ahrefsbot', 'semrushbot', 'mj12bot', 'dotbot', 'petalbot', 'bytespider',
+            'facebookexternalhit', 'twitterbot', 'linkedinbot', 'whatsapp/', 'slackbot',
+            'telegrambot', 'discordbot', 'applebot', 'headlesschrome', 'lighthouse',
+            'pagespeed', 'gtmetrix', 'pingdom', 'uptimerobot', 'statuscake', 'vercel-screenshot',
+            'curl/', 'wget/', 'python-requests', 'go-http-client', 'scrapy', 'webseoai',
+        ] as $bot) {
+            if (str_contains($lower, $bot)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Inspect the live website HTML (SSRF-safe) to verify whether the Web SEO AI tracker script
+     * is installed AND detect existing Google Analytics 4 (G-...) or GTM (GTM-...) tags.
+     */
+    public function verifyLiveInstallation(Website $website): array
+    {
+        $token = $website->ensureTrackingToken();
+        $url = $website->target_url ?: "https://{$website->domain}";
+
+        try {
+            if (!app()->runningUnitTests()) {
+                UrlSecurityValidator::validate($url, $website->domain);
+            }
+
+            $res = Http::withHeaders([
+                'User-Agent' => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+                'Accept' => 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
+            ])->timeout(8)->get($url);
+
+            if (!$res->successful()) {
+                return [
+                    'reachable' => false,
+                    'http_status' => $res->status(),
+                    'tracker_installed' => false,
+                    'detected_ga4_id' => null,
+                    'detected_gtm_id' => null,
+                    'message' => "Could not fetch {$url} (HTTP {$res->status()}).",
+                ];
+            }
+
+            $html = $res->body();
+            $trackerInstalled = str_contains($html, $token);
+
+            $ga4Id = null;
+            if (preg_match('/\b(G-[A-Z0-9]{6,14})\b/', $html, $m)) {
+                $ga4Id = $m[1];
+            }
+
+            $gtmId = null;
+            if (preg_match('/\b(GTM-[A-Z0-9]{5,12})\b/', $html, $m)) {
+                $gtmId = $m[1];
+            }
+
+            $msg = $trackerInstalled
+                ? "Verified! Web SEO AI live tracker ({$token}) is active on {$website->domain}."
+                : ($ga4Id
+                    ? "Web SEO AI script is NOT installed on {$website->domain} yet — however Google Analytics 4 ({$ga4Id}) is already active! Connect GA4 in 1 click OR paste the 1-line script into your site <head>."
+                    : "Web SEO AI tracker script was NOT found in {$website->domain}'s live HTML yet. Paste the 1-line script into your site <head> and click Verify again.");
+
+            return [
+                'reachable' => true,
+                'http_status' => $res->status(),
+                'tracker_installed' => $trackerInstalled,
+                'detected_ga4_id' => $ga4Id,
+                'detected_gtm_id' => $gtmId,
+                'checked_url' => $url,
+                'checked_at' => now()->toIso8601String(),
+                'message' => $msg,
+            ];
+        } catch (Throwable $e) {
+            return [
+                'reachable' => false,
+                'http_status' => null,
+                'tracker_installed' => false,
+                'detected_ga4_id' => null,
+                'detected_gtm_id' => null,
+                'message' => 'Live check could not reach website: ' . $e->getMessage(),
+            ];
+        }
+    }
+
+    /**
+     * Record a live visitor event (pageview or heartbeat) using privacy-safe visitor hashing.
+     */
+    public function recordEvent(Website $website, Request $request, array $payload, bool $isTest = false): WebsiteTrafficEvent
     {
         $ip = $this->extractClientIp($request) ?: '0.0.0.0';
         $ua = (string) ($request->userAgent() ?? '');
-        $visitorHash = hash('sha256', implode('|', [
-            $website->id,
-            $ip,
-            $ua,
-            now()->toDateString(),
-            (string) config('app.key', 'web-seo-ai'),
-        ]));
+        // Prefer anonymous browser-generated client_id (accurate behind mobile CGNAT/office Wi-Fi) hashed with app key
+        $clientId = trim((string) ($payload['client_id'] ?? $payload['vid'] ?? ''));
+        $visitorSeed = $clientId !== ''
+            ? [$website->id, 'cid', $clientId, (string) config('app.key', 'web-seo-ai')]
+            : [$website->id, $ip, $ua, now()->toDateString(), (string) config('app.key', 'web-seo-ai')];
+        $visitorHash = hash('sha256', implode('|', $visitorSeed));
 
         $geo = $this->resolveGeo($request);
         $uaMeta = $this->parseUserAgent($ua);
@@ -203,6 +300,7 @@ class LiveTrafficService
             'visitor_hash' => $visitorHash,
             'session_id' => isset($payload['session_id']) ? Str::limit((string) $payload['session_id'], 64, '') : substr($visitorHash, 0, 24),
             'event_type' => $eventType,
+            'is_test' => $isTest,
             'path' => Str::limit($path, 500, ''),
             'page_title' => isset($payload['title']) && trim((string) $payload['title']) !== '' ? Str::limit(trim((string) $payload['title']), 240, '') : null,
             'referrer_domain' => Str::limit($refDomain, 240, ''),
@@ -226,8 +324,13 @@ class LiveTrafficService
      * Build comprehensive real-time traffic analytics payload with Country, Region, City,
      * Active Visitors Now (5m window), Timeline, Top Pages, Referrers, Devices, and Live Feed.
      */
-    public function getRealtimeStats(Website $website, string $range = '24h', ?string $countryFilter = null, string $baseOrigin = ''): array
-    {
+    public function getRealtimeStats(
+        Website $website,
+        string $range = '24h',
+        ?string $countryFilter = null,
+        string $baseOrigin = '',
+        bool $includeTest = false
+    ): array {
         $token = $website->ensureTrackingToken();
         $now = now();
         $activeSince = (clone $now)->subMinutes(5);
@@ -242,9 +345,14 @@ class LiveTrafficService
 
         $countryFilterUpper = $countryFilter ? strtoupper(trim($countryFilter)) : null;
 
-        // Fetch bounded events for selected range (works identically on SQLite & PostgreSQL)
-        $events = WebsiteTrafficEvent::where('website_id', $website->id)
-            ->where('occurred_at', '>=', $rangeStart)
+        // Strictly separate real website visitor events from synthetic test pings!
+        $eventsQuery = WebsiteTrafficEvent::where('website_id', $website->id)
+            ->where('occurred_at', '>=', $rangeStart);
+        if (!$includeTest) {
+            $eventsQuery->where('is_test', false);
+        }
+
+        $events = $eventsQuery
             ->orderByDesc('occurred_at')
             ->limit(5000)
             ->get();
@@ -459,14 +567,17 @@ class LiveTrafficService
             ->values()
             ->toArray();
 
-        // All-time tracker health
-        $totalAllTime = WebsiteTrafficEvent::where('website_id', $website->id)->count();
-        $lastEventAt = WebsiteTrafficEvent::where('website_id', $website->id)->max('occurred_at');
+        // All-time tracker health (strictly separating real website events vs test pings)
+        $realEventsAllTime = WebsiteTrafficEvent::where('website_id', $website->id)->where('is_test', false)->count();
+        $testEventsAllTime = WebsiteTrafficEvent::where('website_id', $website->id)->where('is_test', true)->count();
+        $lastRealEventAt = WebsiteTrafficEvent::where('website_id', $website->id)->where('is_test', false)->max('occurred_at');
 
         $origin = rtrim($baseOrigin ?: (config('search_console.frontend_url') ?: url('/')), '/');
         $scriptUrl = "{$origin}/api/v1/t/{$token}.js";
 
         return [
+            'data_source' => 'first_party_tracker',
+            'include_test' => $includeTest,
             'range' => $range,
             'country_filter' => $countryFilterUpper,
             'summary' => [
@@ -491,33 +602,58 @@ class LiveTrafficService
                 'tracking_token' => $token,
                 'script_url' => $scriptUrl,
                 'script_tag' => "<script defer src=\"{$scriptUrl}\"></script>",
-                'has_events' => $totalAllTime > 0,
-                'total_events_all_time' => $totalAllTime,
-                'last_event_at' => $lastEventAt ? Carbon::parse($lastEventAt)->toIso8601String() : null,
+                'has_events' => $realEventsAllTime > 0,
+                'has_real_events' => $realEventsAllTime > 0,
+                'real_events_all_time' => $realEventsAllTime,
+                'test_events_all_time' => $testEventsAllTime,
+                'total_events_all_time' => $realEventsAllTime + $testEventsAllTime,
+                'last_event_at' => $lastRealEventAt ? Carbon::parse($lastRealEventAt)->toIso8601String() : null,
             ],
             'generated_at' => $now->toIso8601String(),
         ];
     }
 
     /**
-     * Render tiny, privacy-first, SPA-aware JavaScript live tracker (< 1.5 KB).
+     * Render tiny, ZERO-PREFLIGHT CORS-proof, privacy-first, SPA-aware JavaScript live tracker (< 1.8 KB).
+     * Uses text/plain CORS simple requests + 1x1 GIF pixel fallback so external domains are NEVER blocked by CORS.
      */
-    public function renderTrackerScript(Website $website, string $collectUrl): string
+    public function renderTrackerScript(Website $website, string $collectUrl, ?string $pixelUrl = null): string
     {
         $token = addslashes($website->ensureTrackingToken());
         $endpoint = addslashes($collectUrl);
+        $pixel = addslashes($pixelUrl ?: preg_replace('#/collect$#', '/p.gif', $collectUrl));
 
         return <<<JS
 (function(){
   try {
     var T = "{$token}";
     var E = "{$endpoint}";
+    var P = "{$pixel}";
+    var V = "";
+    try {
+      V = localStorage.getItem("_wsa_vid") || "";
+      if (!V) { V = "v_" + Math.random().toString(36).slice(2) + Date.now().toString(36); localStorage.setItem("_wsa_vid", V); }
+    } catch (e) { V = "v_" + Math.random().toString(36).slice(2); }
     var S = "s_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
     var lastPath = "";
     function getParam(k){try{return new URLSearchParams(location.search).get(k)||"";}catch(e){return "";}}
+    function sendPixel(type){
+      try {
+        var qs = "t=" + encodeURIComponent(T)
+          + "&e=" + encodeURIComponent(type)
+          + "&v=" + encodeURIComponent(V)
+          + "&s=" + encodeURIComponent(S)
+          + "&p=" + encodeURIComponent(location.pathname + location.search)
+          + "&ti=" + encodeURIComponent((document.title || "").slice(0, 150))
+          + "&r=" + encodeURIComponent((document.referrer || "").slice(0, 300));
+        var img = new Image();
+        img.src = P + "?" + qs + "&_=" + Date.now();
+      } catch (err) {}
+    }
     function send(type){
       var payload = JSON.stringify({
         token: T,
+        client_id: V,
         session_id: S,
         event_type: type,
         path: location.pathname + location.search,
@@ -527,11 +663,19 @@ class LiveTrafficService
         utm_medium: getParam("utm_medium"),
         utm_campaign: getParam("utm_campaign")
       });
-      if (navigator.sendBeacon) {
-        var blob = new Blob([payload], {type: "application/json"});
-        navigator.sendBeacon(E, blob);
-      } else {
-        fetch(E, {method: "POST", body: payload, headers: {"Content-Type": "application/json"}, keepalive: true, mode: "cors"}).catch(function(){});
+      // text/plain is a CORS Simple Request (ZERO preflight OPTIONS!) so external sites are NEVER blocked
+      var sent = false;
+      try {
+        if (navigator.sendBeacon) {
+          sent = navigator.sendBeacon(E, new Blob([payload], {type: "text/plain;charset=UTF-8"}));
+        }
+      } catch (e) {}
+      if (!sent) {
+        try {
+          fetch(E, {method: "POST", body: payload, headers: {"Content-Type": "text/plain;charset=UTF-8"}, keepalive: true, mode: "no-cors"}).catch(function(){ sendPixel(type); });
+        } catch (e) {
+          sendPixel(type);
+        }
       }
     }
     function trackPage(){
@@ -546,7 +690,7 @@ class LiveTrafficService
       history.pushState = function(){ origPush.apply(this, arguments); setTimeout(trackPage, 50); };
     }
     window.addEventListener("popstate", function(){ setTimeout(trackPage, 50); });
-    setInterval(function(){ if (document.visibilityState === "visible") send("heartbeat"); }, 25000);
+    setInterval(function(){ if (document.visibilityState === "visible") send("heartbeat"); }, 20000);
   } catch (e) {}
 })();
 JS;

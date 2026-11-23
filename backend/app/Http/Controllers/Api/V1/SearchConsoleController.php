@@ -56,10 +56,16 @@ class SearchConsoleController extends Controller
 
         $frontendBase = rtrim((string) (config('search_console.frontend_url') ?: url('/')), '/');
         $decodedWebsiteId = null;
+        $oauthIntent = 'gsc';
         if ($state !== '') {
             $decoded = json_decode(base64_decode($state), true);
-            if (is_array($decoded) && isset($decoded['website_id'])) {
-                $decodedWebsiteId = (int) $decoded['website_id'];
+            if (is_array($decoded)) {
+                if (isset($decoded['website_id'])) {
+                    $decodedWebsiteId = (int) $decoded['website_id'];
+                }
+                if (($decoded['intent'] ?? '') === 'ga4') {
+                    $oauthIntent = 'ga4';
+                }
             }
         }
 
@@ -121,8 +127,8 @@ class SearchConsoleController extends Controller
             }
 
             return redirect()->away($frontendBase . '/?' . http_build_query([
-                'tab' => 'performance',
-                'gsc' => 'connected',
+                'tab' => $oauthIntent === 'ga4' ? 'live_traffic' : 'performance',
+                $oauthIntent === 'ga4' ? 'ga4' : 'gsc' => 'connected',
                 'website_id' => $integration->website_id,
             ]));
         } catch (Throwable $e) {

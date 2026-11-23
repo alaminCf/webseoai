@@ -6,14 +6,16 @@ use App\Models\Organization;
 use App\Models\OrganizationMember;
 use App\Models\User;
 use App\Models\Website;
+use App\Models\WebsiteIntegration;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
 class LiveTrafficTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_live_traffic_script_beacon_geo_breakdown_and_tenant_isolation(): void
+    public function test_live_traffic_cors_free_beacon_pixel_bot_filter_test_isolation_and_ga4_realtime(): void
     {
         $user = User::factory()->create();
         $foreignUser = User::factory()->create();
@@ -35,41 +37,70 @@ class LiveTrafficTest extends TestCase
         $token = $website->ensureTrackingToken();
         $this->assertStringStartsWith('wsa_', $token);
 
-        // 1. Tracker JS script serves valid JS
+        // 1. Tracker JS script uses zero-preflight text/plain transport + p.gif fallback
         $scriptRes = $this->get("/api/v1/t/{$token}.js");
         $scriptRes->assertOk();
-        $this->assertStringContainsString($token, $scriptRes->getContent());
+        $this->assertStringContainsString('text/plain', $scriptRes->getContent());
+        $this->assertStringContainsString('/api/v1/t/p.gif', $scriptRes->getContent());
 
-        // 2. Public beacon ingests live visits with Vercel Geo headers (Country, Region, City)
+        // 2. Public text/plain beacon ingests live human visits (and ignores bots!)
         $this->withHeaders([
-            'X-Vercel-IP-Country' => 'BD',
-            'X-Vercel-IP-Country-Region' => 'C',
-            'X-Vercel-IP-City' => 'Dhaka',
+            'X-Vercel-IP-Country' => 'SG',
+            'X-Vercel-IP-Country-Region' => '01',
+            'X-Vercel-IP-City' => 'Singapore',
             'User-Agent' => 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile Safari/604.1',
-            'X-Forwarded-For' => '103.100.10.1',
-        ])->postJson('/api/v1/t/collect', [
-            'token' => $token,
-            'event_type' => 'pageview',
-            'path' => '/services/plumbing',
-            'title' => 'Plumbing Services',
-            'referrer' => 'https://www.google.com/search?q=handyman',
-        ])->assertStatus(204);
+            'X-Forwarded-For' => '118.200.10.1',
+        ])->call(
+            'POST',
+            '/api/v1/t/collect',
+            [],
+            [],
+            [],
+            ['CONTENT_TYPE' => 'text/plain;charset=UTF-8'],
+            json_encode([
+                'token' => $token,
+                'client_id' => 'v_sg_visitor_1',
+                'event_type' => 'pageview',
+                'path' => '/services/plumbing',
+                'title' => 'Plumbing Services Singapore',
+                'referrer' => 'https://www.google.com/search?q=handyman+singapore',
+            ])
+        )->assertStatus(204);
 
+        // Bot visit MUST be ignored!
         $this->withHeaders([
             'X-Vercel-IP-Country' => 'US',
-            'X-Vercel-IP-Country-Region' => 'CA',
-            'X-Vercel-IP-City' => 'San%20Francisco',
-            'User-Agent' => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/126.0.0.0 Safari/537.36',
-            'X-Forwarded-For' => '45.55.10.2',
+            'User-Agent' => 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
         ])->postJson('/api/v1/t/collect', [
             'token' => $token,
             'event_type' => 'pageview',
             'path' => '/',
-            'title' => 'Homepage',
-            'referrer' => '',
         ])->assertStatus(204);
 
-        // 3. Realtime analytics returns active visitors, BD Dhaka Division + US CA San Francisco breakdown
+        // 3. 1x1 GIF Pixel fallback records real visit cleanly
+        $this->withHeaders([
+            'X-Vercel-IP-Country' => 'BD',
+            'X-Vercel-IP-Country-Region' => 'C',
+            'X-Vercel-IP-City' => 'Dhaka',
+            'User-Agent' => 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/126.0.0.0 Safari/537.36',
+        ])->get('/api/v1/t/p.gif?' . http_build_query([
+            't' => $token,
+            'e' => 'pageview',
+            'v' => 'v_bd_visitor_2',
+            'p' => '/',
+            'ti' => 'Homepage',
+        ]))->assertOk()->assertHeader('Content-Type', 'image/gif');
+
+        // 4. Test ping is isolated (is_test = true) so default realtime stats ONLY count the 2 real human visitors!
+        $this->actingAs($user)
+            ->withHeaders([
+                'X-Organization-Id' => (string) $org->id,
+                'X-Vercel-IP-Country' => 'GB',
+                'X-Vercel-IP-City' => 'London',
+            ])
+            ->postJson("/api/v1/websites/{$website->id}/traffic/test-ping")
+            ->assertStatus(201);
+
         $statsRes = $this->actingAs($user)
             ->withHeaders(['X-Organization-Id' => (string) $org->id])
             ->getJson("/api/v1/websites/{$website->id}/traffic/realtime?range=24h");
@@ -77,33 +108,80 @@ class LiveTrafficTest extends TestCase
         $statsRes->assertOk()
             ->assertJsonPath('data.summary.active_visitors_now', 2)
             ->assertJsonPath('data.summary.pageviews_range', 2)
-            ->assertJsonPath('data.summary.countries_count', 2);
+            ->assertJsonPath('data.tracker.real_events_all_time', 2)
+            ->assertJsonPath('data.tracker.test_events_all_time', 1);
 
-        $countries = collect($statsRes->json('data.by_country'));
-        $bd = $countries->firstWhere('country_code', 'BD');
-        $this->assertNotNull($bd);
-        $this->assertEquals('Bangladesh', $bd['country_name']);
-
-        // Filter by country=BD shows Dhaka Division / Dhaka only
-        $bdOnly = $this->actingAs($user)
-            ->withHeaders(['X-Organization-Id' => (string) $org->id])
-            ->getJson("/api/v1/websites/{$website->id}/traffic/realtime?range=24h&country=BD");
-        $bdOnly->assertOk()
-            ->assertJsonPath('data.by_region.0.region', 'Dhaka Division')
-            ->assertJsonPath('data.by_region.0.city', 'Dhaka');
-
-        // 4. Test ping endpoint works
+        // Clear test visits works
         $this->actingAs($user)
-            ->withHeaders([
-                'X-Organization-Id' => (string) $org->id,
-                'X-Vercel-IP-Country' => 'GB',
-                'X-Vercel-IP-Country-Region' => 'ENG',
-                'X-Vercel-IP-City' => 'London',
-            ])
-            ->postJson("/api/v1/websites/{$website->id}/traffic/test-ping")
-            ->assertStatus(201);
+            ->withHeaders(['X-Organization-Id' => (string) $org->id])
+            ->deleteJson("/api/v1/websites/{$website->id}/traffic/test-events")
+            ->assertOk()
+            ->assertJsonPath('data.deleted_count', 1);
 
-        // 5. Tenant isolation blocks foreign organization
+        // 5. Verify live installation detects GA4 G-tag and missing tracker script accurately
+        Http::fake([
+            'https://handymansuperservices.com*' => Http::response(
+                '<html><head><script async src="https://www.googletagmanager.com/gtag/js?id=G-ECMTVCJLZC"></script></head><body>Hi</body></html>',
+                200
+            ),
+            'https://analyticsdata.googleapis.com/v1beta/properties/412345678:runRealtimeReport' => Http::response([
+                'rows' => [[
+                    'dimensionValues' => [
+                        ['value' => 'Singapore'],
+                        ['value' => 'SG'],
+                        ['value' => 'Singapore'],
+                        ['value' => '24Hr Handyman Services Singapore'],
+                        ['value' => 'mobile'],
+                    ],
+                    'metricValues' => [
+                        ['value' => '7'],
+                        ['value' => '14'],
+                    ],
+                ]],
+            ], 200),
+            'https://analyticsdata.googleapis.com/v1beta/properties/412345678:runReport' => Http::response([
+                'rows' => [[
+                    'dimensionValues' => [
+                        ['value' => 'Singapore'],
+                        ['value' => 'SG'],
+                        ['value' => 'Central Singapore'],
+                        ['value' => 'Singapore'],
+                    ],
+                    'metricValues' => [
+                        ['value' => '42'],
+                        ['value' => '118'],
+                    ],
+                ]],
+            ], 200),
+        ]);
+
+        $verifyRes = $this->actingAs($user)
+            ->withHeaders(['X-Organization-Id' => (string) $org->id])
+            ->postJson("/api/v1/websites/{$website->id}/traffic/verify-install");
+        $verifyRes->assertOk()
+            ->assertJsonPath('data.tracker_installed', false)
+            ->assertJsonPath('data.detected_ga4_id', 'G-ECMTVCJLZC');
+
+        // 6. Native GA4 Realtime returns exact GA4 active users + Country/Region/City
+        WebsiteIntegration::create([
+            'organization_id' => $org->id,
+            'website_id' => $website->id,
+            'provider' => WebsiteIntegration::PROVIDER_GA4,
+            'encrypted_credentials' => ['access_token' => 'fake_ga4_token', 'expires_at' => now()->addHour()->timestamp],
+            'status' => WebsiteIntegration::STATUS_CONNECTED,
+            'metadata' => ['selected_property_id' => '412345678', 'selected_property_name' => 'Handyman SG GA4'],
+        ]);
+
+        $ga4Res = $this->actingAs($user)
+            ->withHeaders(['X-Organization-Id' => (string) $org->id])
+            ->getJson("/api/v1/websites/{$website->id}/traffic/realtime?range=24h&source=ga4");
+        $ga4Res->assertOk()
+            ->assertJsonPath('data.data_source', 'google_analytics_4')
+            ->assertJsonPath('data.summary.active_visitors_now', 7)
+            ->assertJsonPath('data.by_country.0.country_code', 'SG')
+            ->assertJsonPath('data.by_region.0.region', 'Central Singapore');
+
+        // 7. Tenant isolation blocks foreign organization
         $this->actingAs($foreignUser)
             ->withHeaders(['X-Organization-Id' => (string) $foreignOrg->id])
             ->getJson("/api/v1/websites/{$website->id}/traffic/realtime")

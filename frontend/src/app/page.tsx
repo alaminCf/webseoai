@@ -56,10 +56,11 @@ export default function DashboardPage() {
     const params = new URLSearchParams(window.location.search);
     const tab = params.get('tab');
     const gsc = params.get('gsc');
+    const ga4 = params.get('ga4');
     const reason = params.get('reason');
     const websiteIdParam = params.get('website_id');
 
-    const validTabs = ['overview', 'websites', 'action_plan', 'audits', 'competitors', 'content', 'performance', 'autopilot', 'team', 'settings'];
+    const validTabs = ['overview', 'websites', 'action_plan', 'audits', 'competitors', 'content', 'live_traffic', 'performance', 'autopilot', 'team', 'settings'];
     if (tab && validTabs.includes(tab)) {
       setActiveTab(tab);
     }
@@ -75,9 +76,13 @@ export default function DashboardPage() {
       toast.success('Google Search Console connected! Click "Sync Data" to pull live search analytics.');
     } else if (gsc === 'error') {
       toast.error(reason || 'Google Search Console authorization failed.');
+    } else if (ga4 === 'connected') {
+      toast.success('Google Analytics 4 connected! Loading exact real-time visitor traffic...');
+    } else if (ga4 === 'error') {
+      toast.error(reason || 'Google Analytics 4 authorization failed.');
     }
 
-    if (tab || gsc || websiteIdParam || reason) {
+    if (tab || gsc || ga4 || websiteIdParam || reason) {
       window.history.replaceState({}, '', window.location.pathname);
     }
   }, [toast]);

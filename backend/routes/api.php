@@ -64,8 +64,9 @@ Route::prefix('v1')->group(function () {
     Route::get('/integrations/google-search-console/callback', [SearchConsoleController::class, 'callback']);
     Route::get('/integrations/google-search-console/sandbox-callback', [SearchConsoleController::class, 'callback']);
 
-    // Public Real-Time Traffic Tracker Script & Beacon Ingestion (CORS-enabled, token-scoped)
+    // Public Real-Time Traffic Tracker Script & Beacon Ingestion (CORS-proof, token-scoped)
     Route::get('/t/{token}.js', [LiveTrafficController::class, 'script']);
+    Route::get('/t/p.gif', [LiveTrafficController::class, 'pixel'])->middleware('throttle:120,1');
     Route::options('/t/collect', [LiveTrafficController::class, 'preflight']);
     Route::post('/t/collect', [LiveTrafficController::class, 'collect'])->middleware('throttle:120,1');
 
@@ -176,9 +177,14 @@ Route::prefix('v1')->group(function () {
             Route::get('/websites/{website}/search-console/performance', [SearchConsoleController::class, 'performance']);
             Route::post('/websites/{website}/search-console/inspect', [SearchConsoleController::class, 'inspectUrl']);
 
-            // Real-Time Live Traffic & Country/Region Geo Analytics
+            // Real-Time Live Traffic & Country/Region Geo Analytics + Native GA4 Realtime
             Route::get('/websites/{website}/traffic/realtime', [LiveTrafficController::class, 'realtime']);
+            Route::post('/websites/{website}/traffic/verify-install', [LiveTrafficController::class, 'verifyInstall']);
             Route::post('/websites/{website}/traffic/test-ping', [LiveTrafficController::class, 'testPing']);
+            Route::delete('/websites/{website}/traffic/test-events', [LiveTrafficController::class, 'clearTestEvents']);
+            Route::get('/websites/{website}/traffic/ga4/connect', [LiveTrafficController::class, 'connectGa4']);
+            Route::post('/websites/{website}/traffic/ga4/property', [LiveTrafficController::class, 'selectGa4Property']);
+            Route::post('/websites/{website}/traffic/ga4/disconnect', [LiveTrafficController::class, 'disconnectGa4']);
 
             // Phase 4: Search Opportunities
             Route::get('/websites/{website}/opportunities', [SearchOpportunityController::class, 'index']);

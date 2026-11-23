@@ -133,6 +133,11 @@ class Website extends Model
         return $this->hasOne(WebsiteIntegration::class)->where('provider', WebsiteIntegration::PROVIDER_GSC);
     }
 
+    public function ga4Integration(): HasOne
+    {
+        return $this->hasOne(WebsiteIntegration::class)->where('provider', WebsiteIntegration::PROVIDER_GA4);
+    }
+
     public function cmsSnapshots(): HasMany
     {
         return $this->hasMany(CmsSnapshot::class);

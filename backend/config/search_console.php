@@ -15,6 +15,7 @@ return [
     
     'scopes' => [
         'https://www.googleapis.com/auth/webmasters.readonly',
+        'https://www.googleapis.com/auth/analytics.readonly',
     ],
 
     // Fallback sandbox mode when OAuth credentials are not configured in local/test

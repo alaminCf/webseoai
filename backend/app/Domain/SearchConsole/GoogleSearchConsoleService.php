@@ -183,6 +183,16 @@ class GoogleSearchConsoleService
             ]);
         }
 
+        // Also store Google Analytics 4 integration automatically when analytics.readonly scope is granted (or intent=ga4)
+        $grantedScope = (string) ($credentials['scope'] ?? '');
+        if (($decodedState['intent'] ?? '') === 'ga4' || str_contains($grantedScope, 'analytics.readonly')) {
+            try {
+                app(\App\Domain\Traffic\GoogleAnalyticsService::class)->storeFromTokens($website, $credentials);
+            } catch (Throwable $gaEx) {
+                Log::warning('GA4 auto-connect during Google OAuth callback skipped: ' . $gaEx->getMessage());
+            }
+        }
+
         return $integration;
     }
 

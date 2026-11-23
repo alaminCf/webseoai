@@ -15,6 +15,7 @@ class WebsiteTrafficEvent extends Model
         'visitor_hash',
         'session_id',
         'event_type',
+        'is_test',
         'path',
         'page_title',
         'referrer_domain',
@@ -34,6 +35,7 @@ class WebsiteTrafficEvent extends Model
     ];
 
     protected $casts = [
+        'is_test' => 'boolean',
         'occurred_at' => 'datetime',
         'created_at' => 'datetime',
     ];
