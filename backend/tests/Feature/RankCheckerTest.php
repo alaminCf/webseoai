@@ -185,4 +185,80 @@ class RankCheckerTest extends TestCase
             ])
             ->assertStatus(403);
     }
+
+    public function test_workspace_encrypted_serper_key_enables_live_rank_checker_without_server_env(): void
+    {
+        config([
+            'competitors.providers.dataforseo.login' => '',
+            'competitors.providers.dataforseo.password' => '',
+            'competitors.providers.serpapi.api_key' => '',
+            'competitors.providers.serper.api_key' => '',
+        ]);
+
+        $user = User::factory()->create();
+        $org = Organization::create(['name' => 'Agency Workspace', 'slug' => 'agency-serper-key', 'owner_id' => $user->id]);
+        OrganizationMember::create(['organization_id' => $org->id, 'user_id' => $user->id, 'role' => OrganizationMember::ROLE_SEO_MANAGER]);
+
+        $website = Website::create([
+            'organization_id' => $org->id,
+            'name' => 'Handyman SG',
+            'domain' => 'handymansuperservices.com',
+            'target_url' => 'https://handymansuperservices.com',
+            'platform' => Website::PLATFORM_WORDPRESS,
+            'target_country' => 'SG',
+            'preferred_language' => 'en',
+        ]);
+
+        Http::fake([
+            'https://google.serper.dev/search' => Http::sequence()
+                ->push(['organic' => [['position' => 1, 'link' => 'https://google.com', 'title' => 'Google']]], 200)
+                ->push([
+                    'organic' => [
+                        ['position' => 1, 'link' => 'https://rival.sg/heater', 'title' => 'Rival SG', 'snippet' => 'SG repair'],
+                        ['position' => 2, 'link' => 'https://handymansuperservices.com/heater', 'title' => 'Handyman SG Heater', 'snippet' => 'Fast repair'],
+                    ],
+                ], 200),
+        ]);
+
+        // Before saving key, context reports unconfigured
+        $this->actingAs($user)
+            ->withHeaders(['X-Organization-Id' => (string) $org->id])
+            ->getJson("/api/v1/websites/{$website->id}/rank-checker/context")
+            ->assertOk()
+            ->assertJsonPath('data.provider.configured', false);
+
+        // Save & verify workspace Serper key
+        $saveRes = $this->actingAs($user)
+            ->withHeaders(['X-Organization-Id' => (string) $org->id])
+            ->postJson("/api/v1/websites/{$website->id}/rank-checker/provider-key", [
+                'serper_api_key' => 'serper_live_secret_key_9988',
+            ]);
+
+        $saveRes->assertOk()
+            ->assertJsonPath('data.saved', true)
+            ->assertJsonPath('data.key_hint', '••••9988');
+
+        // Raw key is NEVER exposed in context
+        $ctx = $this->actingAs($user)
+            ->withHeaders(['X-Organization-Id' => (string) $org->id])
+            ->getJson("/api/v1/websites/{$website->id}/rank-checker/context");
+        $ctx->assertOk()
+            ->assertJsonPath('data.provider.configured', true)
+            ->assertJsonPath('data.provider.source', 'workspace_key')
+            ->assertJsonPath('data.provider.key_hint', '••••9988');
+        $this->assertStringNotContainsString('serper_live_secret_key_9988', $ctx->getContent());
+
+        // Live rank check now succeeds using encrypted workspace key!
+        $this->actingAs($user)
+            ->withHeaders(['X-Organization-Id' => (string) $org->id])
+            ->postJson("/api/v1/websites/{$website->id}/rank-checker/check", [
+                'keyword' => 'repair hot water system',
+                'country' => 'SG',
+                'device' => 'mobile',
+                'depth' => 30,
+            ])
+            ->assertStatus(201)
+            ->assertJsonPath('data.target_ranking.position', 2)
+            ->assertJsonPath('data.target_ranking.google_page', 1);
+    }
 }

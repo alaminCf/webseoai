@@ -33,7 +33,7 @@ class CompetitorProviderManager
     /**
      * Resolve the best configured provider for a given capability.
      */
-    public function resolveForCapability(string $capability): CompetitorProviderInterface
+    public function resolveForCapability(string $capability, ?int $organizationId = null): CompetitorProviderInterface
     {
         $priorityOrder = match ($capability) {
             'serp' => ['dataforseo', 'serper', 'serpapi', 'first_party_crawl'],
@@ -44,9 +44,27 @@ class CompetitorProviderManager
             default => ['dataforseo', 'first_party_crawl'],
         };
 
+        $effectiveOrgId = $organizationId;
+        if (!$effectiveOrgId && app()->bound('request')) {
+            $reqOrg = request()->attributes->get('organization');
+            $effectiveOrgId = is_object($reqOrg) && isset($reqOrg->id) ? (int) $reqOrg->id : null;
+        }
+
         foreach ($priorityOrder as $name) {
             $provider = $this->providers[$name] ?? null;
-            if ($provider && $provider->isConfigured() && $provider->supports($capability)) {
+            if (!$provider || !$provider->supports($capability)) {
+                continue;
+            }
+            if ($provider instanceof SerperProvider) {
+                $provider->setRuntimeApiKey(null);
+                $resolvedKey = $provider->resolveEffectiveApiKey($effectiveOrgId);
+                if ($resolvedKey !== '') {
+                    $provider->setRuntimeApiKey($resolvedKey);
+                    return $provider;
+                }
+                continue;
+            }
+            if ($provider->isConfigured()) {
                 return $provider;
             }
         }
@@ -76,10 +94,13 @@ class CompetitorProviderManager
         foreach (['dataforseo', 'serper', 'semrush', 'ahrefs', 'serpapi'] as $key) {
             $p = $this->providers[$key];
             $cfg = config("competitors.providers.{$key}", []);
+            $isConfigured = $p instanceof SerperProvider
+                ? $p->isConfigured($organizationId)
+                : $p->isConfigured();
             $providers[] = [
                 'id' => $key,
                 'label' => $p->getLabel(),
-                'configured' => $p->isConfigured(),
+                'configured' => $isConfigured,
                 'capabilities' => $p->supportedCapabilities(),
                 'required_env_vars' => match ($key) {
                     'dataforseo' => ['DATAFORSEO_LOGIN', 'DATAFORSEO_PASSWORD'],
@@ -95,7 +116,7 @@ class CompetitorProviderManager
 
         $capabilities = [];
         foreach (['discovery', 'domain_metrics', 'keywords', 'backlinks', 'serp'] as $cap) {
-            $active = $this->resolveForCapability($cap);
+            $active = $this->resolveForCapability($cap, $organizationId);
             $capabilities[$cap] = [
                 'active_provider' => $active->getName(),
                 'active_label' => $active->getLabel(),

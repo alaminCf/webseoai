@@ -44,7 +44,12 @@ return [
         ],
         'serper' => [
             'label' => 'Serper.dev (Google Search API)',
-            'api_key' => env('SERPER_API_KEY') ?: env('SERPER_KEY') ?: env('SERPER_API') ?: '',
+            'api_key' => env('SERPER_API_KEY')
+                ?: env('SERPER_KEY')
+                ?: env('SERPER_API')
+                ?: env('SERPER_TOKEN')
+                ?: env('NEXT_PUBLIC_SERPER_API_KEY')
+                ?: '',
             'base_url' => rtrim((string) env('SERPER_BASE_URL', 'https://google.serper.dev'), '/'),
             'capabilities' => ['serp', 'discovery'],
             'docs_url' => 'https://serper.dev/',

@@ -9,6 +9,7 @@ use App\Models\CompetitorDomain;
 use App\Models\CompetitorSerpSnapshot;
 use App\Models\SearchPerformanceRecord;
 use App\Models\Website;
+use App\Models\WebsiteIntegration;
 
 /**
  * Live Geo-Located Google Rank Checker & SERP Simulator.
@@ -89,7 +90,22 @@ class RankCheckerService
             ->values()
             ->toArray();
 
-        $serpProvider = $this->providerManager->resolveForCapability('serp');
+        $serpProvider = $this->providerManager->resolveForCapability('serp', $website->organization_id);
+        $envSerperActive = SerperProvider::resolveEnvApiKey() !== '';
+        $workspaceSerper = SerperProvider::resolveWorkspaceIntegration($website->organization_id);
+
+        $providerSource = 'unconfigured';
+        $keyHint = null;
+        if ($serpProvider->getName() === 'serper') {
+            if ($envSerperActive) {
+                $providerSource = 'server_env';
+            } elseif ($workspaceSerper) {
+                $providerSource = 'workspace_key';
+                $keyHint = $workspaceSerper->metadata['key_hint'] ?? null;
+            }
+        } elseif ($serpProvider->getName() !== 'first_party_crawl') {
+            $providerSource = 'server_env';
+        }
 
         return [
             'website' => [
@@ -103,10 +119,69 @@ class RankCheckerService
                 'name' => $serpProvider->getName(),
                 'label' => $serpProvider->getLabel(),
                 'configured' => $serpProvider->getName() !== 'first_party_crawl',
+                'source' => $providerSource,
+                'key_hint' => $keyHint,
+                'has_workspace_key' => $workspaceSerper !== null,
             ],
             'gsc_top_keywords' => $gscKeywords,
             'recent_checks' => $recentChecks,
         ];
+    }
+
+    /**
+     * Validate and store an encrypted workspace-wide Serper.dev API key.
+     */
+    public function saveSerperKey(Website $website, string $apiKey): array
+    {
+        $cleanKey = trim($apiKey);
+        $serper = new SerperProvider();
+        $check = $serper->verifyApiKey($cleanKey);
+
+        if (!($check['valid'] ?? false)) {
+            return [
+                'saved' => false,
+                'error' => $check['error'] ?? 'Could not verify Serper.dev API key.',
+            ];
+        }
+
+        $hint = strlen($cleanKey) >= 4 ? '••••' . substr($cleanKey, -4) : '••••';
+
+        WebsiteIntegration::updateOrCreate(
+            [
+                'website_id' => $website->id,
+                'provider' => WebsiteIntegration::PROVIDER_SERPER,
+            ],
+            [
+                'organization_id' => $website->organization_id,
+                'encrypted_credentials' => ['api_key' => $cleanKey],
+                'status' => WebsiteIntegration::STATUS_CONNECTED,
+                'last_error' => null,
+                'last_synced_at' => now(),
+                'metadata' => [
+                    'key_hint' => $hint,
+                    'provider_label' => 'Serper.dev (Google Search API)',
+                    'verified_at' => now()->toIso8601String(),
+                ],
+            ]
+        );
+
+        return [
+            'saved' => true,
+            'provider' => 'serper',
+            'label' => 'Serper.dev (Google Search API)',
+            'source' => 'workspace_key',
+            'key_hint' => $hint,
+        ];
+    }
+
+    /**
+     * Remove saved workspace Serper.dev API key(s).
+     */
+    public function removeSerperKey(Website $website): void
+    {
+        WebsiteIntegration::where('organization_id', $website->organization_id)
+            ->where('provider', WebsiteIntegration::PROVIDER_SERPER)
+            ->delete();
     }
 
     /**
@@ -133,12 +208,12 @@ class RankCheckerService
         $effectiveLocation = $cleanLocation !== '' ? $cleanLocation : $countryName;
         $depth = in_array($depth, [20, 30, 50, 100], true) ? $depth : 50;
 
-        $provider = $this->providerManager->resolveForCapability('serp');
+        $provider = $this->providerManager->resolveForCapability('serp', $website->organization_id);
         if ($provider->getName() === 'first_party_crawl') {
             return [
                 'available' => false,
                 'provider' => 'unconfigured',
-                'error' => 'No live Google SERP provider is configured. Set SERPER_API_KEY (2,500 free searches), DATAFORSEO, or SERPAPI_KEY in server environment variables.',
+                'error' => 'Live Google SERP provider is not connected yet. Paste your free Serper.dev API key right inside the "Connect Live Google Search Engine" box above (instant, no redeploy needed), or attach SERPER_API_KEY to your Vercel Backend service.',
             ];
         }
 

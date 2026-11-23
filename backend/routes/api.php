@@ -192,6 +192,10 @@ Route::prefix('v1')->group(function () {
             Route::get('/websites/{website}/rank-checker/context', [RankCheckerController::class, 'context']);
             Route::post('/websites/{website}/rank-checker/check', [RankCheckerController::class, 'check'])->middleware('throttle:30,1');
             Route::get('/websites/{website}/rank-checker/history/{snapshot}', [RankCheckerController::class, 'showSnapshot']);
+            Route::post('/websites/{website}/rank-checker/provider-key', [RankCheckerController::class, 'saveProviderKey'])
+                ->middleware('org.role:editor');
+            Route::delete('/websites/{website}/rank-checker/provider-key', [RankCheckerController::class, 'deleteProviderKey'])
+                ->middleware('org.role:editor');
 
             // Phase 4: Search Opportunities
             Route::get('/websites/{website}/opportunities', [SearchOpportunityController::class, 'index']);

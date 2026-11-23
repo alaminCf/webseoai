@@ -85,6 +85,42 @@ class RankCheckerController extends Controller
         return $this->success($this->rankCheckerService->formatStoredSnapshot($website, $snapshot));
     }
 
+    /**
+     * Live-verify and store an encrypted workspace Serper.dev API key.
+     */
+    public function saveProviderKey(Request $request, Website $website): JsonResponse
+    {
+        $this->authorizeWebsite($request, $website);
+
+        $validated = $request->validate([
+            'serper_api_key' => ['required', 'string', 'min:10', 'max:200'],
+        ]);
+
+        $res = $this->rankCheckerService->saveSerperKey($website, $validated['serper_api_key']);
+        if (!($res['saved'] ?? false)) {
+            return $this->error(
+                $res['error'] ?? 'Could not verify Serper.dev API key.',
+                'SERPER_KEY_INVALID',
+                null,
+                422
+            );
+        }
+
+        return $this->success($res);
+    }
+
+    /**
+     * Disconnect the workspace-stored Serper.dev API key.
+     */
+    public function deleteProviderKey(Request $request, Website $website): JsonResponse
+    {
+        $this->authorizeWebsite($request, $website);
+
+        $this->rankCheckerService->removeSerperKey($website);
+
+        return $this->success(['removed' => true]);
+    }
+
     private function authorizeWebsite(Request $request, Website $website): void
     {
         /** @var Organization|null $org */

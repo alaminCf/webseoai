@@ -4,6 +4,7 @@ namespace App\Domain\Competitors\Providers;
 
 use App\Domain\Competitors\Contracts\CompetitorProviderInterface;
 use App\Domain\Competitors\Support\CountryCatalog;
+use App\Models\WebsiteIntegration;
 use Illuminate\Support\Facades\Http;
 use Throwable;
 
@@ -14,14 +15,85 @@ use Throwable;
 class SerperProvider implements CompetitorProviderInterface
 {
     private string $apiKey;
+    private ?string $runtimeApiKey = null;
     private string $baseUrl;
     private int $timeout;
 
     public function __construct()
     {
-        $this->apiKey = trim((string) config('competitors.providers.serper.api_key', ''));
+        $this->apiKey = self::resolveEnvApiKey();
         $this->baseUrl = rtrim((string) config('competitors.providers.serper.base_url', 'https://google.serper.dev'), '/');
         $this->timeout = (int) config('competitors.http_timeout_seconds', 15);
+    }
+
+    public function setRuntimeApiKey(?string $apiKey): self
+    {
+        $clean = trim((string) ($apiKey ?? ''));
+        $this->runtimeApiKey = $clean !== '' ? $clean : null;
+        return $this;
+    }
+
+    public static function resolveEnvApiKey(): string
+    {
+        $fromConfig = trim((string) config('competitors.providers.serper.api_key', ''));
+        if ($fromConfig !== '') {
+            return $fromConfig;
+        }
+
+        foreach (['SERPER_API_KEY', 'SERPER_KEY', 'SERPER_API', 'SERPER_TOKEN', 'NEXT_PUBLIC_SERPER_API_KEY'] as $var) {
+            $val = $_ENV[$var] ?? $_SERVER[$var] ?? getenv($var);
+            if (is_string($val) && trim($val) !== '') {
+                return trim($val);
+            }
+        }
+
+        return '';
+    }
+
+    public static function resolveWorkspaceIntegration(?int $organizationId): ?WebsiteIntegration
+    {
+        if (!$organizationId) {
+            return null;
+        }
+
+        try {
+            return WebsiteIntegration::where('organization_id', $organizationId)
+                ->where('provider', WebsiteIntegration::PROVIDER_SERPER)
+                ->where('status', WebsiteIntegration::STATUS_CONNECTED)
+                ->orderByDesc('updated_at')
+                ->first();
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    public static function resolveWorkspaceApiKey(?int $organizationId): string
+    {
+        $integration = self::resolveWorkspaceIntegration($organizationId);
+        if (!$integration) {
+            return '';
+        }
+
+        $creds = $integration->getDecryptedCredentials();
+        if (is_array($creds)) {
+            return trim((string) ($creds['api_key'] ?? ''));
+        }
+
+        return is_string($creds) ? trim($creds) : '';
+    }
+
+    public function resolveEffectiveApiKey(?int $organizationId = null): string
+    {
+        if ($this->runtimeApiKey !== null && $this->runtimeApiKey !== '') {
+            return $this->runtimeApiKey;
+        }
+
+        $envKey = self::resolveEnvApiKey();
+        if ($envKey !== '') {
+            return $envKey;
+        }
+
+        return self::resolveWorkspaceApiKey($organizationId);
     }
 
     public function getName(): string
@@ -34,10 +106,55 @@ class SerperProvider implements CompetitorProviderInterface
         return 'Serper.dev (Google Search API)';
     }
 
-    public function isConfigured(): bool
+    public function isConfigured(?int $organizationId = null): bool
     {
-        $this->apiKey = trim((string) config('competitors.providers.serper.api_key', ''));
+        $this->apiKey = $this->resolveEffectiveApiKey($organizationId);
         return $this->apiKey !== '';
+    }
+
+    /**
+     * Live-verify a Serper.dev API key before saving it encrypted in the workspace.
+     */
+    public function verifyApiKey(string $apiKey): array
+    {
+        $cleanKey = trim($apiKey);
+        if ($cleanKey === '') {
+            return ['valid' => false, 'error' => 'API key cannot be empty.'];
+        }
+
+        try {
+            $res = Http::withHeaders([
+                'X-API-KEY' => $cleanKey,
+                'Content-Type' => 'application/json',
+            ])->timeout(12)->post("{$this->baseUrl}/search", [
+                'q' => 'google',
+                'gl' => 'us',
+                'hl' => 'en',
+                'num' => 1,
+            ]);
+
+            if ($res->successful()) {
+                $json = $res->json() ?? [];
+                return [
+                    'valid' => true,
+                    'credits' => $json['credits'] ?? null,
+                ];
+            }
+
+            $bodyMsg = trim((string) ($res->json('message') ?? $res->json('error') ?? ''));
+            return [
+                'valid' => false,
+                'http_status' => $res->status(),
+                'error' => $bodyMsg !== ''
+                    ? "Serper.dev rejected this key (HTTP {$res->status()}): {$bodyMsg}"
+                    : "Serper.dev rejected this key (HTTP {$res->status()}). Please check your API key at serper.dev/api-key.",
+            ];
+        } catch (Throwable $e) {
+            return [
+                'valid' => false,
+                'error' => 'Could not reach Serper.dev to verify key: ' . $e->getMessage(),
+            ];
+        }
     }
 
     public function supportedCapabilities(): array

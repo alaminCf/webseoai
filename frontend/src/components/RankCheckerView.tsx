@@ -25,6 +25,8 @@ import {
   ShieldCheck,
   Target,
   X,
+  KeyRound,
+  Trash2,
 } from 'lucide-react';
 import { Website } from '@/types';
 import { api } from '@/lib/api';
@@ -75,6 +77,9 @@ interface RankCheckerContextData {
     name: string;
     label: string;
     configured: boolean;
+    source?: 'server_env' | 'workspace_key' | 'unconfigured';
+    key_hint?: string | null;
+    has_workspace_key?: boolean;
   };
   gsc_top_keywords: GscTopKeyword[];
   recent_checks: RecentRankCheck[];
@@ -221,6 +226,12 @@ export function RankCheckerView({
   const [loadingSnapshotId, setLoadingSnapshotId] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Serper.dev Workspace API Key quick-connect state
+  const [showKeySetup, setShowKeySetup] = useState<boolean>(false);
+  const [serperKeyInput, setSerperKeyInput] = useState<string>('');
+  const [isSavingKey, setIsSavingKey] = useState<boolean>(false);
+  const [isRemovingKey, setIsRemovingKey] = useState<boolean>(false);
+
   // SERP pagination & filter
   const [selectedPage, setSelectedPage] = useState<number | 'all'>(1);
   const [serpSearch, setSerpSearch] = useState<string>('');
@@ -282,6 +293,9 @@ export function RankCheckerView({
       const res = await api.get<RankCheckerContextData>(`/websites/${website.id}/rank-checker/context`);
       if (res.success && res.data) {
         setContext(res.data);
+        if (!res.data.provider.configured) {
+          setShowKeySetup(true);
+        }
       }
     } finally {
       setIsLoadingContext(false);
@@ -376,6 +390,58 @@ export function RankCheckerView({
       runLiveCheck({ keyword: kw });
     }
   }, [website, initialKeyword, onConsumeInitialKeyword, runLiveCheck]);
+
+  const handleSaveSerperKey = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!website) return;
+    const trimmed = serperKeyInput.trim();
+    if (trimmed.length < 10) {
+      toast.error('Please paste your full Serper.dev API key.');
+      return;
+    }
+
+    setIsSavingKey(true);
+    setErrorMessage(null);
+    try {
+      const res = await api.post<{ saved: boolean; key_hint?: string }>(
+        `/websites/${website.id}/rank-checker/provider-key`,
+        { serper_api_key: trimmed }
+      );
+      if (res.success && res.data?.saved) {
+        toast.success('Serper.dev Live Google Search Engine connected & encrypted for your workspace!');
+        setSerperKeyInput('');
+        setShowKeySetup(false);
+        await loadContext();
+        if (keyword.trim()) {
+          runLiveCheck({ keyword: keyword.trim(), forceRefresh: true });
+        }
+      } else {
+        const msg = res.error?.message || 'Could not verify Serper.dev API key.';
+        setErrorMessage(msg);
+        toast.error(msg);
+      }
+    } catch {
+      toast.error('Network error verifying Serper.dev API key.');
+    } finally {
+      setIsSavingKey(false);
+    }
+  };
+
+  const handleRemoveSerperKey = async () => {
+    if (!website) return;
+    setIsRemovingKey(true);
+    try {
+      const res = await api.delete(`/websites/${website.id}/rank-checker/provider-key`);
+      if (res.success) {
+        toast.info('Workspace Serper API key removed.');
+        await loadContext();
+      } else {
+        toast.error(res.error?.message || 'Could not remove workspace API key.');
+      }
+    } finally {
+      setIsRemovingKey(false);
+    }
+  };
 
   const loadStoredSnapshot = async (snapshotId: number) => {
     if (!website) return;
@@ -482,17 +548,20 @@ export function RankCheckerView({
                 {website.domain}
               </span>
               {context?.provider && (
-                <span
-                  className={`text-[11px] font-medium px-2 py-0.5 rounded-md border ${
+                <button
+                  type="button"
+                  onClick={() => setShowKeySetup((v) => !v)}
+                  className={`inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-0.5 rounded-md border transition ${
                     context.provider.configured
-                      ? 'bg-sky-500/10 text-sky-400 border-sky-500/30'
-                      : 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+                      ? 'bg-sky-500/10 text-sky-400 border-sky-500/30 hover:bg-sky-500/20'
+                      : 'bg-amber-500/15 text-amber-300 border-amber-500/40 hover:bg-amber-500/25'
                   }`}
                 >
+                  <KeyRound className="w-3 h-3" />
                   {context.provider.configured
-                    ? `Live SERP Engine: ${context.provider.label}`
-                    : 'SERP Engine Not Configured'}
-                </span>
+                    ? `Live SERP: ${context.provider.label}${context.provider.key_hint ? ` (${context.provider.key_hint})` : ''}`
+                    : 'Connect Live Google Search Key'}
+                </button>
               )}
             </div>
             <h1 className="text-lg sm:text-xl font-bold text-zinc-100">
@@ -503,6 +572,84 @@ export function RankCheckerView({
             </p>
           </div>
         </div>
+
+        {/* 1-Click Serper.dev Workspace API Key Setup Panel */}
+        {showKeySetup && (
+          <div className="mt-4 p-4 rounded-xl bg-amber-950/20 border border-amber-500/30 space-y-3">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 text-xs font-bold text-amber-300">
+                  <KeyRound className="w-4 h-4" />
+                  Connect Live Google Search Engine (Serper.dev — 2,500 Free Searches)
+                </div>
+                <p className="text-[11px] text-zinc-300 leading-relaxed max-w-3xl">
+                  Paste your <strong className="text-zinc-100">Serper.dev API Key</strong> below to unlock exact live Google Pages 1–10, country/city geo-targeting, and Local Map Pack checks immediately across all websites in your workspace (AES-256 encrypted, zero server redeploy needed).
+                  <span className="block text-zinc-400 mt-0.5">
+                    Already added <code className="text-amber-300">SERPER_API_KEY</code> on Vercel? In multi-service Vercel projects it must be attached to the <strong>backend</strong> service &amp; redeployed — or simply paste the exact same key here for instant activation.
+                  </span>
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href="https://serper.dev/api-key"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-[11px] font-semibold text-zinc-200 transition"
+                >
+                  Get Free Key (serper.dev)
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+                {context?.provider?.configured && (
+                  <button
+                    type="button"
+                    onClick={() => setShowKeySetup(false)}
+                    className="p-1 text-zinc-400 hover:text-zinc-200"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <form onSubmit={handleSaveSerperKey} className="flex flex-col sm:flex-row gap-2">
+              <input
+                type="password"
+                value={serperKeyInput}
+                onChange={(e) => setSerperKeyInput(e.target.value)}
+                placeholder="Paste your Serper.dev API key (e.g. a1b2c3d4e5f6...)"
+                className="flex-1 px-3.5 py-2 bg-zinc-950 border border-zinc-800 rounded-xl text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:border-emerald-500/60 font-mono"
+              />
+              <button
+                type="submit"
+                disabled={isSavingKey || serperKeyInput.trim().length < 10}
+                className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold transition whitespace-nowrap"
+              >
+                {isSavingKey ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    Verifying Key...
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    Verify &amp; Activate Live Search
+                  </>
+                )}
+              </button>
+              {context?.provider?.has_workspace_key && (
+                <button
+                  type="button"
+                  disabled={isRemovingKey}
+                  onClick={handleRemoveSerperKey}
+                  className="inline-flex items-center justify-center gap-1 px-3 py-2 rounded-xl bg-red-950/40 hover:bg-red-900/50 border border-red-800/60 text-red-300 text-xs font-medium transition"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Remove
+                </button>
+              )}
+            </form>
+          </div>
+        )}
 
         {/* Search Controls Form */}
         <form

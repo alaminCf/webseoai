@@ -17,6 +17,7 @@ class WebsiteIntegration extends Model
     public const PROVIDER_CUSTOM_WEBHOOK = 'custom_webhook';
     public const PROVIDER_GSC = 'gsc_oauth';
     public const PROVIDER_GA4 = 'ga4_oauth';
+    public const PROVIDER_SERPER = 'serper_api';
 
     public const PROVIDERS = [
         self::PROVIDER_WORDPRESS,
@@ -24,6 +25,7 @@ class WebsiteIntegration extends Model
         self::PROVIDER_CUSTOM_WEBHOOK,
         self::PROVIDER_GSC,
         self::PROVIDER_GA4,
+        self::PROVIDER_SERPER,
     ];
 
     public const STATUS_CONNECTED = 'connected';
