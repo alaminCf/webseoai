@@ -22,6 +22,9 @@ import {
   CheckCircle2,
   ShieldCheck,
   Building2,
+  Upload,
+  ImageIcon,
+  Trash2,
 } from 'lucide-react';
 import { Website } from '@/types';
 import { api } from '@/lib/api';
@@ -146,10 +149,12 @@ export function ReportsCenterView({ website }: ReportsCenterViewProps) {
   // White-label branding editor
   const [showBrandingPanel, setShowBrandingPanel] = useState<boolean>(false);
   const [brandName, setBrandName] = useState<string>('');
+  const [brandLogoUrl, setBrandLogoUrl] = useState<string>('');
   const [brandColor, setBrandColor] = useState<string>('#10b981');
   const [contactEmail, setContactEmail] = useState<string>('');
   const [footerText, setFooterText] = useState<string>('Confidential SEO Performance, Technical Audit & Growth Report');
   const [isSavingBranding, setIsSavingBranding] = useState<boolean>(false);
+  const [isProcessingLogo, setIsProcessingLogo] = useState<boolean>(false);
 
   const loadBundle = useCallback(async () => {
     if (!website) return;
@@ -161,6 +166,7 @@ export function ReportsCenterView({ website }: ReportsCenterViewProps) {
       if (res.success && res.data) {
         setBundle(res.data);
         setBrandName(res.data.branding.agency_name || '');
+        setBrandLogoUrl(res.data.branding.agency_logo_url || '');
         setBrandColor(res.data.branding.theme_color || '#10b981');
         setContactEmail(res.data.branding.contact_email || '');
         setFooterText(
@@ -186,6 +192,72 @@ export function ReportsCenterView({ website }: ReportsCenterViewProps) {
     );
   };
 
+  const handleLogoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      toast.error('Please upload an image file (PNG, JPG, WebP, or SVG).');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error('Logo image must be under 5 MB.');
+      return;
+    }
+
+    setIsProcessingLogo(true);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const rawDataUrl = typeof reader.result === 'string' ? reader.result : '';
+      if (!rawDataUrl) {
+        setIsProcessingLogo(false);
+        toast.error('Could not read logo image.');
+        return;
+      }
+
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const maxW = 480;
+          const maxH = 160;
+          const natW = img.naturalWidth || img.width || 240;
+          const natH = img.naturalHeight || img.height || 80;
+          const scale = Math.min(1, maxW / natW, maxH / natH);
+          const w = Math.max(1, Math.round(natW * scale));
+          const h = Math.max(1, Math.round(natH * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            setIsProcessingLogo(false);
+            toast.error('Browser could not process logo image.');
+            return;
+          }
+          ctx.drawImage(img, 0, 0, w, h);
+          const optimizedPng = canvas.toDataURL('image/png');
+          setBrandLogoUrl(optimizedPng);
+          toast.success('Logo loaded! Click "Save Branding" to apply it to all PDF reports.');
+        } catch {
+          toast.error('Could not optimize logo image.');
+        } finally {
+          setIsProcessingLogo(false);
+        }
+      };
+      img.onerror = () => {
+        setIsProcessingLogo(false);
+        toast.error('Invalid image file. Try PNG, JPG, or WebP.');
+      };
+      img.src = rawDataUrl;
+    };
+    reader.onerror = () => {
+      setIsProcessingLogo(false);
+      toast.error('Failed to read selected logo file.');
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleSaveBranding = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!brandName.trim()) {
@@ -196,12 +268,13 @@ export function ReportsCenterView({ website }: ReportsCenterViewProps) {
     try {
       const res = await api.put('/white-label/branding', {
         brand_name: brandName.trim(),
+        logo_url: brandLogoUrl.trim() || null,
         primary_color: brandColor,
         contact_email: contactEmail.trim() || null,
         footer_text: footerText.trim() || 'Confidential SEO Performance & Technical Report',
       });
       if (res.success) {
-        toast.success('White-label PDF branding saved!');
+        toast.success('White-label logo & branding saved! It will appear on all PDF reports.');
         setShowBrandingPanel(false);
         loadBundle();
       } else {
@@ -212,7 +285,7 @@ export function ReportsCenterView({ website }: ReportsCenterViewProps) {
     }
   };
 
-  const handleDownloadFullPdf = () => {
+  const handleDownloadFullPdf = async () => {
     if (!bundle) return;
     if (selectedSections.length === 0) {
       toast.error('Select at least one report section to include in your PDF.');
@@ -225,12 +298,13 @@ export function ReportsCenterView({ website }: ReportsCenterViewProps) {
         branding: {
           ...bundle.branding,
           agency_name: brandName.trim() || bundle.branding.agency_name,
+          agency_logo_url: brandLogoUrl.trim() || null,
           theme_color: brandColor || bundle.branding.theme_color,
           contact_email: contactEmail.trim() || bundle.branding.contact_email,
           footer_text: footerText.trim() || bundle.branding.footer_text,
         },
       };
-      const filename = downloadExecutivePdfReport(effectiveBundle, {
+      const filename = await downloadExecutivePdfReport(effectiveBundle, {
         reportTitle,
         preparedFor,
         selectedSections,
@@ -244,7 +318,7 @@ export function ReportsCenterView({ website }: ReportsCenterViewProps) {
     }
   };
 
-  const handleDownloadSingleSectionPdf = (sectionKey: SectionKey, label: string) => {
+  const handleDownloadSingleSectionPdf = async (sectionKey: SectionKey, label: string) => {
     if (!bundle) return;
     setDownloadingKey(`pdf_${sectionKey}`);
     try {
@@ -253,6 +327,7 @@ export function ReportsCenterView({ website }: ReportsCenterViewProps) {
         branding: {
           ...bundle.branding,
           agency_name: brandName.trim() || bundle.branding.agency_name,
+          agency_logo_url: brandLogoUrl.trim() || null,
           theme_color: brandColor || bundle.branding.theme_color,
           contact_email: contactEmail.trim() || bundle.branding.contact_email,
           footer_text: footerText.trim() || bundle.branding.footer_text,
@@ -260,7 +335,7 @@ export function ReportsCenterView({ website }: ReportsCenterViewProps) {
       };
       const sectionsToInclude =
         sectionKey === 'executive_summary' ? ['executive_summary'] : ['executive_summary', sectionKey];
-      const filename = downloadExecutivePdfReport(effectiveBundle, {
+      const filename = await downloadExecutivePdfReport(effectiveBundle, {
         reportTitle: `${label} Report`,
         preparedFor,
         selectedSections: sectionsToInclude,
@@ -401,15 +476,73 @@ export function ReportsCenterView({ website }: ReportsCenterViewProps) {
         {showBrandingPanel && (
           <form
             onSubmit={handleSaveBranding}
-            className="p-4 rounded-xl bg-zinc-900/70 border border-zinc-800 space-y-3"
+            className="p-4 rounded-xl bg-zinc-900/70 border border-zinc-800 space-y-4"
           >
             <div className="flex items-center justify-between">
               <div className="text-xs font-bold text-zinc-200 flex items-center gap-1.5">
                 <Building2 className="w-3.5 h-3.5 text-emerald-400" />
                 Agency White-Label PDF Branding
               </div>
-              <span className="text-[11px] text-zinc-500">Applied to cover banner, headers &amp; footers</span>
+              <span className="text-[11px] text-zinc-500">Applied to cover banner, running headers &amp; footers</span>
             </div>
+
+            {/* Agency Logo Upload Row */}
+            <div className="p-3.5 rounded-xl bg-zinc-950/80 border border-zinc-800/90 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="flex items-center gap-3.5">
+                <div className="w-28 h-12 rounded-lg bg-white border border-zinc-700 flex items-center justify-center p-1.5 shrink-0 overflow-hidden">
+                  {brandLogoUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={brandLogoUrl}
+                      alt="Agency Logo Preview"
+                      className="max-w-full max-h-full object-contain"
+                    />
+                  ) : (
+                    <div className="flex flex-col items-center text-zinc-400">
+                      <ImageIcon className="w-4 h-4" />
+                      <span className="text-[9px] font-medium mt-0.5">No Logo</span>
+                    </div>
+                  )}
+                </div>
+                <div className="space-y-0.5">
+                  <div className="text-xs font-semibold text-zinc-200">
+                    Agency / Company Logo (PDF Cover &amp; Page Headers)
+                  </div>
+                  <p className="text-[11px] text-zinc-400">
+                    Upload PNG, JPG, WebP, or SVG (auto-resized for crisp 300-DPI PDF rendering).
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 text-xs font-semibold cursor-pointer transition">
+                  {isProcessingLogo ? (
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Upload className="w-3.5 h-3.5" />
+                  )}
+                  <span>{brandLogoUrl ? 'Change Logo' : 'Upload Logo'}</span>
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                    onChange={handleLogoFileChange}
+                    className="hidden"
+                  />
+                </label>
+
+                {brandLogoUrl && (
+                  <button
+                    type="button"
+                    onClick={() => setBrandLogoUrl('')}
+                    className="inline-flex items-center gap-1 px-2.5 py-2 rounded-xl bg-red-950/40 hover:bg-red-900/50 border border-red-800/60 text-red-300 text-xs font-medium transition"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Remove
+                  </button>
+                )}
+              </div>
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
               <div>
                 <label className="block text-[11px] text-zinc-400 mb-1">Agency / Brand Name *</label>
@@ -460,8 +593,8 @@ export function ReportsCenterView({ website }: ReportsCenterViewProps) {
             <div className="flex justify-end">
               <button
                 type="submit"
-                disabled={isSavingBranding}
-                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition"
+                disabled={isSavingBranding || isProcessingLogo}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold transition"
               >
                 <Save className="w-3.5 h-3.5" />
                 {isSavingBranding ? 'Saving...' : 'Save Branding'}
@@ -663,8 +796,19 @@ export function ReportsCenterView({ website }: ReportsCenterViewProps) {
       ) : bundle ? (
         <div className="bg-zinc-950 border border-zinc-800/80 rounded-2xl overflow-hidden">
           <div className="px-5 py-4 border-b border-zinc-800 flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <Eye className="w-4 h-4 text-emerald-400" />
+            <div className="flex items-center gap-3">
+              {brandLogoUrl ? (
+                <div className="h-8 px-2 rounded-lg bg-white border border-zinc-700 flex items-center justify-center shrink-0">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={brandLogoUrl}
+                    alt={brandName || 'Agency Logo'}
+                    className="max-h-6 max-w-[110px] object-contain"
+                  />
+                </div>
+              ) : (
+                <Eye className="w-4 h-4 text-emerald-400" />
+              )}
               <h2 className="text-sm font-bold text-zinc-100">
                 Live Executive Report Preview — {bundle.website.domain}
               </h2>

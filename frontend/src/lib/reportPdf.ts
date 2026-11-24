@@ -269,10 +269,94 @@ function formatDateReadable(iso: string | null | undefined): string {
   }
 }
 
+interface LoadedLogo {
+  dataUrl: string;
+  format: 'PNG' | 'JPEG';
+  width: number;
+  height: number;
+}
+
+/**
+ * Load a base64 data URI or external HTTPS logo URL into a crisp normalized PNG + dimensions
+ * so jsPDF renders it cleanly without distortion or CORS crashes.
+ */
+async function loadLogoForPdf(logoUrl: string | null | undefined): Promise<LoadedLogo | null> {
+  if (!logoUrl || typeof window === 'undefined') return null;
+  const trimmed = logoUrl.trim();
+  if (!trimmed) return null;
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    if (!trimmed.startsWith('data:')) {
+      img.crossOrigin = 'anonymous';
+    }
+    const timeoutId = window.setTimeout(() => resolve(null), 4000);
+
+    img.onload = () => {
+      window.clearTimeout(timeoutId);
+      const natW = img.naturalWidth || img.width || 0;
+      const natH = img.naturalHeight || img.height || 0;
+      if (natW <= 0 || natH <= 0) {
+        resolve(null);
+        return;
+      }
+
+      try {
+        const maxW = 480;
+        const maxH = 160;
+        const scale = Math.min(1, maxW / natW, maxH / natH);
+        const w = Math.max(1, Math.round(natW * scale));
+        const h = Math.max(1, Math.round(natH * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(null);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL('image/png');
+        resolve({ dataUrl, format: 'PNG', width: w, height: h });
+      } catch {
+        // Fallback if already a PNG/JPEG data URI
+        if (trimmed.startsWith('data:image/png')) {
+          resolve({ dataUrl: trimmed, format: 'PNG', width: natW, height: natH });
+        } else if (trimmed.startsWith('data:image/jpeg') || trimmed.startsWith('data:image/jpg')) {
+          resolve({ dataUrl: trimmed, format: 'JPEG', width: natW, height: natH });
+        } else {
+          resolve(null);
+        }
+      }
+    };
+
+    img.onerror = () => {
+      window.clearTimeout(timeoutId);
+      resolve(null);
+    };
+
+    img.src = trimmed;
+  });
+}
+
+function fitLogoBox(logo: LoadedLogo, maxW: number, maxH: number): { w: number; h: number } {
+  const ratio = logo.width / Math.max(1, logo.height);
+  let w = maxW;
+  let h = w / ratio;
+  if (h > maxH) {
+    h = maxH;
+    w = h * ratio;
+  }
+  return { w, h };
+}
+
 /**
  * Generate and download a crisp, executive vector PDF report for Web SEO AI.
  */
-export function downloadExecutivePdfReport(bundle: ReportBundle, options: PdfCustomOptions = {}): string {
+export async function downloadExecutivePdfReport(
+  bundle: ReportBundle,
+  options: PdfCustomOptions = {}
+): Promise<string> {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
@@ -284,6 +368,8 @@ export function downloadExecutivePdfReport(bundle: ReportBundle, options: PdfCus
   const mutedText: [number, number, number] = [100, 116, 139];
   const lightBg: [number, number, number] = [248, 250, 252];
   const borderColor: [number, number, number] = [226, 232, 240];
+
+  const loadedLogo = await loadLogoForPdf(bundle.branding.agency_logo_url);
 
   const sections = options.selectedSections && options.selectedSections.length > 0
     ? options.selectedSections
@@ -300,16 +386,40 @@ export function downloadExecutivePdfReport(bundle: ReportBundle, options: PdfCus
   let y = 0;
 
   // --- Executive Top Banner ---
+  const bannerHeight = loadedLogo ? 50 : 44;
   doc.setFillColor(...darkSlate);
-  doc.rect(0, 0, pageWidth, 44, 'F');
+  doc.rect(0, 0, pageWidth, bannerHeight, 'F');
   doc.setFillColor(...brandRgb);
-  doc.rect(0, 44, pageWidth, 2.2, 'F');
+  doc.rect(0, bannerHeight, pageWidth, 2.2, 'F');
 
-  // Agency Pill & Report ID
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9);
-  doc.setTextColor(...brandRgb);
-  doc.text(agencyName.toUpperCase(), margin, 12);
+  let titleStartY = 22;
+  let metaStartY = 30;
+  let preparedStartY = 36.5;
+
+  if (loadedLogo) {
+    const { w, h } = fitLogoBox(loadedLogo, 34, 12);
+    // Clean white rounded container behind logo so both dark and transparent logos look crisp
+    const padX = 2.5;
+    const padY = 1.6;
+    doc.setFillColor(255, 255, 255);
+    doc.roundedRect(margin, 6.5, w + padX * 2, h + padY * 2, 2, 2, 'F');
+    doc.addImage(loadedLogo.dataUrl, loadedLogo.format, margin + padX, 6.5 + padY, w, h, undefined, 'FAST');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.5);
+    doc.setTextColor(...brandRgb);
+    doc.text(agencyName.toUpperCase(), margin + w + padX * 2 + 4, 6.5 + (h + padY * 2) / 2 + 1.2);
+
+    titleStartY = 28;
+    metaStartY = 36;
+    preparedStartY = 42.5;
+  } else {
+    // Agency Pill
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(...brandRgb);
+    doc.text(agencyName.toUpperCase(), margin, 12);
+  }
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8);
@@ -322,22 +432,22 @@ export function downloadExecutivePdfReport(bundle: ReportBundle, options: PdfCus
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(17);
   doc.setTextColor(255, 255, 255);
-  doc.text(truncateText(reportTitle, 58), margin, 22);
+  doc.text(truncateText(reportTitle, 58), margin, titleStartY);
 
   // Domain & Prepared For
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9.5);
   doc.setTextColor(203, 213, 225);
-  doc.text(`Website: ${bundle.website.domain}  (${bundle.website.platform.toUpperCase()})`, margin, 30);
-  doc.text(`Prepared for: ${truncateText(preparedFor, 45)}`, margin, 36.5);
+  doc.text(`Website: ${bundle.website.domain}  (${bundle.website.platform.toUpperCase()})`, margin, metaStartY);
+  doc.text(`Prepared for: ${truncateText(preparedFor, 45)}`, margin, preparedStartY);
 
   doc.setFontSize(8.5);
   doc.setTextColor(148, 163, 184);
-  doc.text(`Generated: ${formatDateReadable(bundle.generated_at)}`, pageWidth - margin, 36.5, {
+  doc.text(`Generated: ${formatDateReadable(bundle.generated_at)}`, pageWidth - margin, preparedStartY, {
     align: 'right',
   });
 
-  y = 54;
+  y = bannerHeight + 10;
 
   const ensureSpace = (neededMm: number) => {
     if (y + neededMm > pageHeight - 18) {
@@ -973,10 +1083,18 @@ export function downloadExecutivePdfReport(bundle: ReportBundle, options: PdfCus
       doc.rect(0, 0, pageWidth, 12, 'F');
       doc.setDrawColor(...borderColor);
       doc.line(0, 12, pageWidth, 12);
+
+      let headerTextX = margin;
+      if (loadedLogo) {
+        const mini = fitLogoBox(loadedLogo, 18, 7.5);
+        doc.addImage(loadedLogo.dataUrl, loadedLogo.format, margin, (12 - mini.h) / 2, mini.w, mini.h, undefined, 'FAST');
+        headerTextX = margin + mini.w + 3;
+      }
+
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(7.5);
       doc.setTextColor(...darkSlate);
-      doc.text(`${agencyName}  •  ${bundle.website.domain}`, margin, 7.5);
+      doc.text(`${agencyName}  •  ${bundle.website.domain}`, headerTextX, 7.5);
       doc.setFont('helvetica', 'normal');
       doc.setTextColor(...mutedText);
       doc.text(`${bundle.range_label}  |  ${bundle.report_id}`, pageWidth - margin, 7.5, { align: 'right' });
@@ -1004,62 +1122,93 @@ export function downloadExecutivePdfReport(bundle: ReportBundle, options: PdfCus
 /**
  * Download a dedicated PDF report for a single live geo-located Google Rank Check (SERP #1..#N).
  */
-export function downloadLiveSerpPdf(serp: {
-  keyword: string;
-  country: string;
-  country_name: string;
-  location: string;
-  device: string;
-  language: string;
-  target_domain: string;
-  results_returned: number;
-  captured_at: string | null;
-  target_ranking: {
-    found: boolean;
-    position: number | null;
-    google_page: number | null;
-    rank_on_page: number | null;
-    primary_match?: { url: string; title: string } | null;
-    in_local_pack: boolean;
-    local_pack_position: number | null;
-  };
-  gsc_comparison: {
-    has_gsc_data: boolean;
-    gsc_avg_position: number | null;
-    gsc_clicks: number;
-    gsc_impressions: number;
-    gsc_ctr: number;
-    verdict: string;
-  };
-  organic_results: Array<{
-    position: number;
-    google_page: number;
-    rank_on_page: number;
-    domain: string;
-    url: string;
-    title: string;
-    is_target: boolean;
-    is_competitor: boolean;
-  }>;
-}): string {
+export async function downloadLiveSerpPdf(
+  serp: {
+    keyword: string;
+    country: string;
+    country_name: string;
+    location: string;
+    device: string;
+    language: string;
+    target_domain: string;
+    results_returned: number;
+    captured_at: string | null;
+    target_ranking: {
+      found: boolean;
+      position: number | null;
+      google_page: number | null;
+      rank_on_page: number | null;
+      primary_match?: { url: string; title: string } | null;
+      in_local_pack: boolean;
+      local_pack_position: number | null;
+    };
+    gsc_comparison: {
+      has_gsc_data: boolean;
+      gsc_avg_position: number | null;
+      gsc_clicks: number;
+      gsc_impressions: number;
+      gsc_ctr: number;
+      verdict: string;
+    };
+    organic_results: Array<{
+      position: number;
+      google_page: number;
+      rank_on_page: number;
+      domain: string;
+      url: string;
+      title: string;
+      is_target: boolean;
+      is_competitor: boolean;
+    }>;
+  },
+  branding?: {
+    brand_name?: string;
+    logo_url?: string | null;
+    primary_color?: string;
+    footer_text?: string;
+  } | null
+): Promise<string> {
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
   const margin = 14;
+  const brandRgb = hexToRgb(branding?.primary_color || '#10b981');
+  const loadedLogo = await loadLogoForPdf(branding?.logo_url);
 
+  const bannerH = loadedLogo ? 44 : 38;
   doc.setFillColor(15, 23, 42);
-  doc.rect(0, 0, pageWidth, 38, 'F');
-  doc.setFillColor(16, 185, 129);
-  doc.rect(0, 38, pageWidth, 2, 'F');
+  doc.rect(0, 0, pageWidth, bannerH, 'F');
+  doc.setFillColor(...brandRgb);
+  doc.rect(0, bannerH, pageWidth, 2, 'F');
 
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9);
-  doc.setTextColor(16, 185, 129);
-  doc.text('LIVE GEO-LOCATED GOOGLE SERP REPORT', margin, 11);
+  if (loadedLogo) {
+    const box = fitLogoBox(loadedLogo, 30, 10);
+    doc.setFillColor(255, 255, 255);
+    doc.roundedRect(margin, 5.5, box.w + 4, box.h + 2.8, 1.8, 1.8, 'F');
+    doc.addImage(loadedLogo.dataUrl, loadedLogo.format, margin + 2, 5.5 + 1.4, box.w, box.h, undefined, 'FAST');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(...brandRgb);
+    doc.text(
+      `${(branding?.brand_name || 'WEB SEO AI').toUpperCase()}  •  LIVE GOOGLE SERP REPORT`,
+      margin + box.w + 8,
+      5.5 + (box.h + 2.8) / 2 + 1
+    );
+  } else {
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(...brandRgb);
+    doc.text(
+      `${branding?.brand_name ? `${branding.brand_name.toUpperCase()}  •  ` : ''}LIVE GEO-LOCATED GOOGLE SERP REPORT`,
+      margin,
+      11
+    );
+  }
 
   doc.setFontSize(15);
   doc.setTextColor(255, 255, 255);
-  doc.text(`Keyword: "${truncateText(serp.keyword, 48)}"`, margin, 20);
+  doc.text(`Keyword: "${truncateText(serp.keyword, 48)}"`, margin, loadedLogo ? 25 : 20);
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(9);
@@ -1067,12 +1216,12 @@ export function downloadLiveSerpPdf(serp: {
   doc.text(
     `Target: ${serp.target_domain}  |  Location: ${serp.location} (${serp.country})  |  Device: ${serp.device.toUpperCase()}`,
     margin,
-    29
+    loadedLogo ? 34 : 29
   );
   doc.setFontSize(8);
-  doc.text(`Checked: ${formatDateReadable(serp.captured_at)}`, pageWidth - margin, 29, { align: 'right' });
+  doc.text(`Checked: ${formatDateReadable(serp.captured_at)}`, pageWidth - margin, loadedLogo ? 34 : 29, { align: 'right' });
 
-  let y = 48;
+  let y = bannerH + 10;
 
   // Summary box
   doc.setFillColor(248, 250, 252);

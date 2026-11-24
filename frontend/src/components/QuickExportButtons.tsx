@@ -46,7 +46,7 @@ export function QuickExportButtons({
         `/websites/${website.id}/reports/bundle?range=${encodeURIComponent(range)}&sections=executive_summary,${section}`
       );
       if (res.success && res.data) {
-        const fname = downloadExecutivePdfReport(res.data, {
+        const fname = await downloadExecutivePdfReport(res.data, {
           reportTitle,
           selectedSections: ['executive_summary', section],
           filenamePrefix,

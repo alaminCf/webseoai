@@ -81,23 +81,44 @@ class WhiteLabelReportController extends Controller
         /** @var OrganizationMember $membership */
         $membership = $request->attributes->get('membership');
 
-        if (!$membership->isAdmin()) {
-            return $this->error('Only owners or admins can modify white-label branding.', 'INSUFFICIENT_PERMISSIONS', null, 403);
+        if (!$membership->hasMinimumRole(OrganizationMember::ROLE_SEO_MANAGER)) {
+            return $this->error('Only owners, admins, or SEO managers can modify white-label branding.', 'INSUFFICIENT_PERMISSIONS', null, 403);
         }
 
         $validated = $request->validate([
             'brand_name' => ['required', 'string', 'max:255'],
-            'logo_url' => ['nullable', 'url'],
+            'logo_url' => [
+                'nullable',
+                'string',
+                'max:700000',
+                function (string $attribute, mixed $value, \Closure $fail) {
+                    if ($value === null || trim((string) $value) === '') {
+                        return;
+                    }
+                    $str = trim((string) $value);
+                    $isHttpUrl = filter_var($str, FILTER_VALIDATE_URL) !== false
+                        && preg_match('#^https?://#i', $str) === 1;
+                    $isSafeDataUri = preg_match('#^data:image/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=\s]+$#i', $str) === 1;
+
+                    if (!$isHttpUrl && !$isSafeDataUri) {
+                        $fail('The logo must be a valid image upload (PNG/JPG/WebP) or http(s) image URL.');
+                    }
+                },
+            ],
             'primary_color' => ['nullable', 'regex:/^#([a-f0-9]{6}|[a-f0-9]{3})$/i'],
             'contact_email' => ['nullable', 'email'],
             'footer_text' => ['nullable', 'string', 'max:500'],
             'remove_platform_branding' => ['nullable', 'boolean'],
         ]);
 
+        $cleanLogo = isset($validated['logo_url']) && trim((string) $validated['logo_url']) !== ''
+            ? trim((string) $validated['logo_url'])
+            : null;
+
         $settings = $org->settings ?? [];
         $settings['white_label'] = [
             'brand_name' => $validated['brand_name'],
-            'logo_url' => $validated['logo_url'] ?? null,
+            'logo_url' => $cleanLogo,
             'primary_color' => $validated['primary_color'] ?? '#10b981',
             'contact_email' => $validated['contact_email'] ?? null,
             'footer_text' => $validated['footer_text'] ?? 'Confidential SEO Strategy & Technical Audit Report',
@@ -112,7 +133,11 @@ class WhiteLabelReportController extends Controller
             'white_label.updated',
             $org,
             null,
-            $settings['white_label']
+            [
+                'brand_name' => $settings['white_label']['brand_name'],
+                'has_logo' => $cleanLogo !== null,
+                'primary_color' => $settings['white_label']['primary_color'],
+            ]
         );
 
         return $this->success($settings['white_label']);

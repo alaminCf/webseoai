@@ -289,5 +289,26 @@ class ReportExportTest extends TestCase
             ->withHeaders(['X-Organization-Id' => (string) $foreignOrg->id])
             ->get("/api/v1/websites/{$website->id}/reports/export/csv?dataset=full_summary")
             ->assertStatus(403);
+
+        // 4. White-label base64 PNG logo upload persists and flows into report bundle
+        $tinyPngDataUri = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+        $this->actingAs($user)
+            ->withHeaders(['X-Organization-Id' => (string) $org->id])
+            ->putJson('/api/v1/white-label/branding', [
+                'brand_name' => 'Techboloy',
+                'logo_url' => $tinyPngDataUri,
+                'primary_color' => '#8b5cf6',
+                'contact_email' => 'seo@techboloy.com',
+                'footer_text' => 'Confidential Techboloy Report',
+            ])
+            ->assertOk()
+            ->assertJsonPath('data.logo_url', $tinyPngDataUri);
+
+        $this->actingAs($user)
+            ->withHeaders(['X-Organization-Id' => (string) $org->id])
+            ->getJson("/api/v1/websites/{$website->id}/reports/bundle?range=28d&sections=executive_summary")
+            ->assertOk()
+            ->assertJsonPath('data.branding.agency_name', 'Techboloy')
+            ->assertJsonPath('data.branding.agency_logo_url', $tinyPngDataUri);
     }
 }

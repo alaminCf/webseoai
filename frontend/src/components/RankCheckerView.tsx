@@ -1221,8 +1221,14 @@ export function RankCheckerView({
 
                   <button
                     type="button"
-                    onClick={() => {
-                      const f = downloadLiveSerpPdf(result);
+                    onClick={async () => {
+                      const brandRes = await api.get<{
+                        brand_name?: string;
+                        logo_url?: string | null;
+                        primary_color?: string;
+                        footer_text?: string;
+                      }>('/white-label/branding');
+                      const f = await downloadLiveSerpPdf(result, brandRes.success ? brandRes.data : null);
                       toast.success(`Downloaded SERP PDF: ${f}`);
                     }}
                     className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 font-semibold transition"

@@ -271,7 +271,7 @@ Route::prefix('v1')->group(function () {
             // Phase 7: White-Label Reports & Agency Branding
             Route::get('/white-label/branding', [WhiteLabelReportController::class, 'getBranding']);
             Route::put('/white-label/branding', [WhiteLabelReportController::class, 'updateBranding'])
-                ->middleware('org.role:admin');
+                ->middleware('org.role:seo_manager');
             Route::get('/websites/{website}/reports/white-label', [WhiteLabelReportController::class, 'getReport']);
 
             // Comprehensive Platform Reporting & PDF/CSV Exports (All Modules)
