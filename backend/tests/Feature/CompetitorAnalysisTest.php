@@ -891,4 +891,75 @@ class CompetitorAnalysisTest extends TestCase
             'title' => $firstImp['title'],
         ]);
     }
+
+    public function test_compare_direct_upserts_discovered_candidate_and_verifies_live_backlinks_head_to_head(): void
+    {
+        config([
+            'competitors.providers.dataforseo.login' => '',
+            'competitors.providers.dataforseo.password' => '',
+            'competitors.providers.serpapi.api_key' => '',
+            'competitors.providers.serper.api_key' => 'test_serper_backlink_compare',
+        ]);
+
+        // 1. 1-Click "Compare with My Site" from Discovery Results upserts candidate cleanly
+        $directRes = $this->actingAs($this->seoManager)
+            ->withHeaders($this->authHeaders($this->seoManager, $this->org))
+            ->postJson("/api/v1/websites/{$this->website->id}/competitors/compare-direct", [
+                'domain' => 'besthandyman.sg',
+                'category' => 'direct',
+                'tier' => 'primary',
+                'country' => 'SG',
+                'language' => 'en',
+                'discovery_confidence' => 96,
+            ]);
+
+        $directRes->assertStatus(201)
+            ->assertJsonPath('data.created', true)
+            ->assertJsonPath('data.competitor.domain', 'besthandyman.sg');
+
+        $compId = $directRes->json('data.competitor.id');
+
+        // Calling again returns existing without error
+        $this->actingAs($this->seoManager)
+            ->withHeaders($this->authHeaders($this->seoManager, $this->org))
+            ->postJson("/api/v1/websites/{$this->website->id}/competitors/compare-direct", [
+                'domain' => 'besthandyman.sg',
+            ])
+            ->assertOk()
+            ->assertJsonPath('data.created', false)
+            ->assertJsonPath('data.competitor.id', $compId);
+
+        // 2. Mock competitor homepage + external referring page with a live HTML dofollow backlink to besthandyman.sg
+        Http::fake([
+            'https://besthandyman.sg' => Http::response('<html><head><title>Best Handyman SG</title><meta name="description" content="24/7 Handyman Singapore"></head><body><h1>Best Handyman Singapore</h1><h2>Plumbing</h2><p>Trusted Singapore handyman team.</p></body></html>', 200),
+            'https://besthandyman.sg/sitemap.xml' => Http::response('', 404),
+            'https://carematebd.com' => Http::response('<html><head><title>CareMate BD</title></head><body><h1>CareMate</h1></body></html>', 200),
+            'https://carematebd.com/sitemap.xml' => Http::response('', 404),
+            'https://sgdirectory.sg/top-handymen' => Http::response('<html><body><a href="https://besthandyman.sg/plumbing">Best Handyman Singapore 24hr</a></body></html>', 200),
+            'https://google.serper.dev/search' => function ($req) {
+                $q = (string) ($req['q'] ?? '');
+                if (str_contains($q, '"besthandyman.sg" -site:besthandyman.sg')) {
+                    return Http::response([
+                        'organic' => [
+                            ['position' => 1, 'link' => 'https://sgdirectory.sg/top-handymen', 'title' => 'Top Handymen SG', 'snippet' => 'Featuring besthandyman.sg'],
+                        ],
+                    ], 200);
+                }
+                return Http::response(['organic' => []], 200);
+            },
+        ]);
+
+        $ddRes = $this->actingAs($this->seoManager)
+            ->withHeaders($this->authHeaders($this->seoManager, $this->org))
+            ->getJson("/api/v1/websites/{$this->website->id}/competitors/{$compId}/deep-dive?refresh=1");
+
+        $ddRes->assertOk()
+            ->assertJsonPath('data.backlink_comparison.summary.competitor_referring_domains', 1)
+            ->assertJsonPath('data.backlink_comparison.summary.competitor_verified_backlinks', 1)
+            ->assertJsonPath('data.backlink_comparison.summary.competitor_dofollow', 1)
+            ->assertJsonPath('data.backlink_comparison.summary.gap_count', 1)
+            ->assertJsonPath('data.backlink_comparison.gap_links.0.referring_domain', 'sgdirectory.sg')
+            ->assertJsonPath('data.backlink_comparison.gap_links.0.link_type', 'dofollow')
+            ->assertJsonPath('data.backlink_comparison.gap_links.0.anchor_text', 'Best Handyman Singapore 24hr');
+    }
 }

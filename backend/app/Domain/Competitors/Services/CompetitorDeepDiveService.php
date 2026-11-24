@@ -5,6 +5,7 @@ namespace App\Domain\Competitors\Services;
 use App\Domain\Competitors\CompetitorProviderManager;
 use App\Domain\Competitors\Providers\FirstPartyCrawlProvider;
 use App\Models\AiRecommendation;
+use App\Models\CompetitorBacklink;
 use App\Models\CompetitorDomain;
 use App\Models\CompetitorDomainSnapshot;
 use App\Models\CompetitorKeyword;
@@ -39,7 +40,7 @@ class CompetitorDeepDiveService
             ->orderByDesc('captured_at')
             ->first();
 
-        if (!$targetSnap || $forceRefresh || !isset($targetSnap->crawled_signals['onpage_seo_score'])) {
+        if (!$targetSnap || $forceRefresh || !isset($targetSnap->crawled_signals['onpage_seo_score']) || !array_key_exists('verified_backlinks_count', $targetSnap->crawled_signals ?? [])) {
             $targetSnap = $this->comparisonService->captureDomainSnapshot(
                 $website,
                 $website->domain,
@@ -55,7 +56,7 @@ class CompetitorDeepDiveService
             ->orderByDesc('captured_at')
             ->first();
 
-        if (!$compSnap || $forceRefresh || !isset($compSnap->crawled_signals['onpage_seo_score'])) {
+        if (!$compSnap || $forceRefresh || !isset($compSnap->crawled_signals['onpage_seo_score']) || !array_key_exists('verified_backlinks_count', $compSnap->crawled_signals ?? [])) {
             $compSnap = $this->comparisonService->captureDomainSnapshot(
                 $website,
                 $competitor->domain,
@@ -73,8 +74,11 @@ class CompetitorDeepDiveService
         // 2. Run targeted head-to-head Google keyword battles via Serper/SERP provider if none exist for this competitor yet
         $keywordBattles = $this->collectHeadToHeadKeywords($website, $competitor, $targetSnap, $compSnap, $country, $language, $forceRefresh);
 
-        // 3. Build 12-Metric Head-to-Head Scorecard
-        $scorecard = $this->buildScorecard($website, $competitor, $targetSnap, $compSnap, $tSig, $cSig);
+        // 2B. Build Comprehensive Side-by-Side Backlinks & Referring Domains Comparison
+        $backlinkComparison = $this->buildBacklinkComparison($website, $competitor, $targetSnap, $compSnap, $tSig, $cSig);
+
+        // 3. Build 14-Metric Head-to-Head Scorecard (including Backlinks & Referring Domains!)
+        $scorecard = $this->buildScorecard($website, $competitor, $targetSnap, $compSnap, $tSig, $cSig, $backlinkComparison);
 
         $wins = count(array_filter($scorecard, fn ($r) => $r['winner'] === 'target'));
         $losses = count(array_filter($scorecard, fn ($r) => $r['winner'] === 'competitor'));
@@ -171,6 +175,22 @@ class CompetitorDeepDiveService
             ],
             'scorecard' => $scorecard,
             'improvements' => $improvements,
+            'backlink_comparison' => $backlinkComparison,
+            'target_profile' => [
+                'page_title' => $tSig['page_title'] ?? null,
+                'meta_description' => $tSig['meta_description'] ?? null,
+                'h1_tags' => $tSig['h1_tags'] ?? [],
+                'h2_outline' => $tSig['h2_tags'] ?? [],
+                'structured_data_types' => $tSig['structured_data_types'] ?? [],
+                'has_sitemap' => (bool) ($tSig['has_sitemap'] ?? false),
+                'has_blog_section' => (bool) ($tSig['has_blog_section'] ?? false),
+                'has_faq_signal' => (bool) ($tSig['has_faq_signal'] ?? false),
+                'has_contact_cta' => (bool) ($tSig['has_contact_cta'] ?? false),
+                'load_time_ms' => $tSig['load_time_ms'] ?? null,
+                'word_count' => $tSig['word_count'] ?? null,
+                'indexed_pages' => $targetSnap->indexed_pages_count ?? ($tSig['google_indexed_sample_count'] ?? null),
+                'top_pages' => array_slice($targetSnap->top_pages ?? [], 0, 12),
+            ],
             'competitor_profile' => [
                 'page_title' => $cSig['page_title'] ?? null,
                 'meta_description' => $cSig['meta_description'] ?? null,
@@ -182,11 +202,161 @@ class CompetitorDeepDiveService
                 'has_faq_signal' => (bool) ($cSig['has_faq_signal'] ?? false),
                 'has_contact_cta' => (bool) ($cSig['has_contact_cta'] ?? false),
                 'is_blocked_by_waf' => (bool) ($cSig['is_blocked_by_waf'] ?? false),
+                'load_time_ms' => $cSig['load_time_ms'] ?? null,
+                'word_count' => $cSig['word_count'] ?? null,
+                'indexed_pages' => $compSnap->indexed_pages_count ?? ($cSig['google_indexed_sample_count'] ?? null),
                 'top_pages' => $competitorPages,
                 'web_mentions' => $cSig['web_mentions'] ?? [],
             ],
             'citation_opportunities' => array_slice($citationOpportunities, 0, 10),
             'keyword_battles' => $keywordBattles,
+        ];
+    }
+
+    /**
+     * Build detailed head-to-head Backlinks & Referring Domains comparison combining
+     * 3rd-party backlink providers (if connected) + Live HTML-Verified Backlinks & Google Citations.
+     */
+    private function buildBacklinkComparison(
+        Website $website,
+        CompetitorDomain $competitor,
+        CompetitorDomainSnapshot $tSnap,
+        CompetitorDomainSnapshot $cSnap,
+        array $tSig,
+        array $cSig
+    ): array {
+        $targetLinks = [];
+        $compLinks = [];
+        $seenTargetDomains = [];
+        $seenCompDomains = [];
+
+        // 1. Pull any 3rd-party CompetitorBacklink rows (DataForSEO / Ahrefs / Semrush)
+        $dbTargetLinks = CompetitorBacklink::where('website_id', $website->id)
+            ->where('is_target_site', true)
+            ->orderByDesc('referring_authority')
+            ->limit(60)
+            ->get();
+
+        foreach ($dbTargetLinks as $bl) {
+            $rd = strtolower(trim((string) $bl->referring_domain));
+            if ($rd === '') continue;
+            $seenTargetDomains[$rd] = true;
+            $targetLinks[] = [
+                'referring_domain' => $rd,
+                'referring_url' => (string) ($bl->referring_url ?: "https://{$rd}"),
+                'destination_url' => (string) ($bl->destination_url ?? ''),
+                'anchor_text' => (string) ($bl->anchor_text ?? ''),
+                'link_type' => (string) ($bl->link_type ?: 'dofollow'),
+                'verified_backlink' => true,
+                'authority' => $bl->referring_authority,
+                'title' => null,
+                'snippet' => null,
+                'source' => (string) ($bl->data_source ?: 'third_party'),
+            ];
+        }
+
+        $dbCompLinks = CompetitorBacklink::where('website_id', $website->id)
+            ->where('competitor_domain_id', $competitor->id)
+            ->orderByDesc('referring_authority')
+            ->limit(60)
+            ->get();
+
+        foreach ($dbCompLinks as $bl) {
+            $rd = strtolower(trim((string) $bl->referring_domain));
+            if ($rd === '') continue;
+            $seenCompDomains[$rd] = true;
+            $compLinks[] = [
+                'referring_domain' => $rd,
+                'referring_url' => (string) ($bl->referring_url ?: "https://{$rd}"),
+                'destination_url' => (string) ($bl->destination_url ?? ''),
+                'anchor_text' => (string) ($bl->anchor_text ?? ''),
+                'link_type' => (string) ($bl->link_type ?: 'dofollow'),
+                'verified_backlink' => true,
+                'authority' => $bl->referring_authority,
+                'title' => null,
+                'snippet' => null,
+                'source' => (string) ($bl->data_source ?: 'third_party'),
+            ];
+        }
+
+        // 2. Merge Live HTML-Verified Backlinks & Google Referring Citations
+        foreach ($tSig['web_mentions'] ?? [] as $m) {
+            $rd = strtolower(trim((string) ($m['domain'] ?? '')));
+            if ($rd === '' || isset($seenTargetDomains[$rd])) continue;
+            $seenTargetDomains[$rd] = true;
+            $targetLinks[] = [
+                'referring_domain' => $rd,
+                'referring_url' => (string) ($m['url'] ?? "https://{$rd}"),
+                'destination_url' => (string) ($m['destination_url'] ?? ''),
+                'anchor_text' => (string) ($m['anchor_text'] ?? ''),
+                'link_type' => (string) ($m['link_type'] ?? 'mention'),
+                'verified_backlink' => (bool) ($m['verified_backlink'] ?? false),
+                'authority' => null,
+                'title' => (string) ($m['title'] ?? ''),
+                'snippet' => (string) ($m['snippet'] ?? ''),
+                'source' => (string) ($m['source'] ?? 'google_web_mention'),
+            ];
+        }
+
+        foreach ($cSig['web_mentions'] ?? [] as $m) {
+            $rd = strtolower(trim((string) ($m['domain'] ?? '')));
+            if ($rd === '' || isset($seenCompDomains[$rd])) continue;
+            $seenCompDomains[$rd] = true;
+            $compLinks[] = [
+                'referring_domain' => $rd,
+                'referring_url' => (string) ($m['url'] ?? "https://{$rd}"),
+                'destination_url' => (string) ($m['destination_url'] ?? ''),
+                'anchor_text' => (string) ($m['anchor_text'] ?? ''),
+                'link_type' => (string) ($m['link_type'] ?? 'mention'),
+                'verified_backlink' => (bool) ($m['verified_backlink'] ?? false),
+                'authority' => null,
+                'title' => (string) ($m['title'] ?? ''),
+                'snippet' => (string) ($m['snippet'] ?? ''),
+                'source' => (string) ($m['source'] ?? 'google_web_mention'),
+            ];
+        }
+
+        // 3. Classify Gap vs Shared vs Target-Exclusive referring domains
+        $gapLinks = [];
+        $sharedLinks = [];
+        foreach ($compLinks as $cl) {
+            if (isset($seenTargetDomains[$cl['referring_domain']])) {
+                $sharedLinks[] = $cl;
+            } else {
+                $gapLinks[] = $cl;
+            }
+        }
+
+        $targetExclusiveLinks = [];
+        foreach ($targetLinks as $tl) {
+            if (!isset($seenCompDomains[$tl['referring_domain']])) {
+                $targetExclusiveLinks[] = $tl;
+            }
+        }
+
+        $hasThirdParty = $dbTargetLinks->isNotEmpty() || $dbCompLinks->isNotEmpty() || $tSnap->referring_domains_count !== null || $cSnap->referring_domains_count !== null;
+
+        return [
+            'summary' => [
+                'target_referring_domains' => $tSnap->referring_domains_count ?? count($seenTargetDomains),
+                'competitor_referring_domains' => $cSnap->referring_domains_count ?? count($seenCompDomains),
+                'target_backlinks_total' => $tSnap->backlinks_count ?? count($targetLinks),
+                'competitor_backlinks_total' => $cSnap->backlinks_count ?? count($compLinks),
+                'target_verified_backlinks' => count(array_filter($targetLinks, fn ($l) => !empty($l['verified_backlink']))),
+                'competitor_verified_backlinks' => count(array_filter($compLinks, fn ($l) => !empty($l['verified_backlink']))),
+                'target_dofollow' => count(array_filter($targetLinks, fn ($l) => ($l['link_type'] ?? '') === 'dofollow')),
+                'competitor_dofollow' => count(array_filter($compLinks, fn ($l) => ($l['link_type'] ?? '') === 'dofollow')),
+                'target_nofollow' => count(array_filter($targetLinks, fn ($l) => in_array($l['link_type'] ?? '', ['nofollow', 'ugc', 'sponsored'], true))),
+                'competitor_nofollow' => count(array_filter($compLinks, fn ($l) => in_array($l['link_type'] ?? '', ['nofollow', 'ugc', 'sponsored'], true))),
+                'gap_count' => count($gapLinks),
+                'shared_count' => count($sharedLinks),
+                'target_exclusive_count' => count($targetExclusiveLinks),
+                'source_label' => $hasThirdParty ? '3rd-Party + Live HTML Backlink Verification' : 'Live HTML Backlink Verification + Google Citations',
+            ],
+            'gap_links' => array_slice($gapLinks, 0, 25),
+            'shared_links' => array_slice($sharedLinks, 0, 20),
+            'competitor_links' => array_slice($compLinks, 0, 25),
+            'target_links' => array_slice($targetLinks, 0, 25),
         ];
     }
 
@@ -247,7 +417,8 @@ class CompetitorDeepDiveService
         CompetitorDomainSnapshot $tSnap,
         CompetitorDomainSnapshot $cSnap,
         array $tSig,
-        array $cSig
+        array $cSig,
+        array $backlinkComparison = []
     ): array {
         $tScore = $tSig['onpage_seo_score'] ?? null;
         $cScore = $cSig['onpage_seo_score'] ?? null;
@@ -282,8 +453,18 @@ class CompetitorDeepDiveService
         $tMentions = $tSig['web_mentions_count'] ?? null;
         $cMentions = $cSig['web_mentions_count'] ?? null;
 
+        $blSum = $backlinkComparison['summary'] ?? [];
+        $tRefDom = $blSum['target_referring_domains'] ?? null;
+        $cRefDom = $blSum['competitor_referring_domains'] ?? null;
+        $tVerBl = $blSum['target_verified_backlinks'] ?? null;
+        $cVerBl = $blSum['competitor_verified_backlinks'] ?? null;
+        $tDofollow = $blSum['target_dofollow'] ?? null;
+        $cDofollow = $blSum['competitor_dofollow'] ?? null;
+
         $rows = [
             $this->metricRow('On-Page SEO Score', 'Overall', $tScore, $cScore, $tScore !== null ? "{$tScore}/100" : 'Pending crawl', $cScore !== null ? "{$cScore}/100" : 'WAF/Unavailable', 'higher', 'Calculated First-Party'),
+            $this->metricRow('Referring Domains & Citations', 'Backlinks', $tRefDom, $cRefDom, $tRefDom !== null ? number_format($tRefDom) . ' domains' : 'N/A', $cRefDom !== null ? number_format($cRefDom) . ' domains' : 'N/A', 'higher', $blSum['source_label'] ?? 'Live Backlink Check'),
+            $this->metricRow('Verified External Backlinks', 'Backlinks', $tVerBl, $cVerBl, $tVerBl !== null ? number_format($tVerBl) . ' links (' . ($tDofollow ?? 0) . ' dofollow)' : 'N/A', $cVerBl !== null ? number_format($cVerBl) . ' links (' . ($cDofollow ?? 0) . ' dofollow)' : 'N/A', 'higher', 'Live HTML Link Verification'),
             $this->metricRow('Homepage Content Depth', 'Content', $tWords, $cWords, $tWords !== null ? number_format($tWords) . ' words' : 'N/A', $cWords !== null ? number_format($cWords) . ' words' : 'N/A', 'higher', 'Verified First-Party'),
             $this->metricRow('Server Response Speed', 'Technical', $tSpeed, $cSpeed, $tSpeed !== null ? "{$tSpeed} ms" : 'N/A', $cSpeed !== null ? "{$cSpeed} ms" : 'N/A', 'lower', 'Verified First-Party'),
             $this->metricRow('Indexed / Discovered Pages', 'Visibility', $tIndexed, $cIndexed, $tIndexed !== null ? number_format($tIndexed) . ' pages' : 'N/A', $cIndexed !== null ? number_format($cIndexed) . ' pages' : 'N/A', 'higher', isset($cSig['google_indexed_sample_count']) ? 'Google Index / Sitemap' : 'Verified Sitemap/Crawl'),
@@ -293,15 +474,11 @@ class CompetitorDeepDiveService
             $this->metricRow('Meta Description (Ideal 70–160)', 'On-Page SEO', $tMetaLen, $cMetaLen, $tMetaLen ? "{$tMetaLen} chars" : 'Missing', $cMetaLen ? "{$cMetaLen} chars" : 'Missing', 'range_meta', 'Verified First-Party'),
             $this->metricRow('Image Alt-Text Coverage', 'Accessibility', $tAlt, $cAlt, $tAlt !== null ? "{$tAlt}%" : 'N/A', $cAlt !== null ? "{$cAlt}%" : 'N/A', 'higher', 'Verified First-Party'),
             $this->metricRow('Internal Links on Homepage', 'Architecture', $tLinks, $cLinks, $tLinks !== null ? "{$tLinks} links" : 'N/A', $cLinks !== null ? "{$cLinks} links" : 'N/A', 'higher', 'Verified First-Party'),
-            $this->metricRow('Public Google Web Mentions', 'Authority', $tMentions, $cMentions, $tMentions !== null ? "{$tMentions} mentions" : 'Connect Serper', $cMentions !== null ? "{$cMentions} mentions" : 'Connect Serper', 'higher', 'Serper.dev Google'),
         ];
 
-        // Append third-party metrics ONLY when at least one side has data (so we never spam empty rows)
+        // Append third-party traffic estimate ONLY when at least one side has data
         if ($tSnap->organic_traffic_estimate !== null || $cSnap->organic_traffic_estimate !== null) {
             $rows[] = $this->metricRow('Est. Monthly Organic Traffic', '3rd-Party', $tSnap->organic_traffic_estimate, $cSnap->organic_traffic_estimate, $tSnap->organic_traffic_estimate !== null ? number_format($tSnap->organic_traffic_estimate) : 'N/A', $cSnap->organic_traffic_estimate !== null ? number_format($cSnap->organic_traffic_estimate) : 'N/A', 'higher', 'Third-Party Estimate');
-        }
-        if ($tSnap->referring_domains_count !== null || $cSnap->referring_domains_count !== null) {
-            $rows[] = $this->metricRow('Referring Domains', '3rd-Party', $tSnap->referring_domains_count, $cSnap->referring_domains_count, $tSnap->referring_domains_count !== null ? number_format($tSnap->referring_domains_count) : 'N/A', $cSnap->referring_domains_count !== null ? number_format($cSnap->referring_domains_count) : 'N/A', 'higher', 'Third-Party Estimate');
         }
 
         return $rows;
@@ -612,8 +789,8 @@ class CompetitorDeepDiveService
             ->filter(fn ($k) => isset(($k->competitor_positions ?? [])[$compDomain]));
 
         // 2. If none exist yet and a SERP provider (like Serper.dev) is connected, run 3 live head-to-head Google checks!
-        if (($existing->isEmpty() || $forceRefresh) && $this->providerManager->hasExternalProviderFor('serp')) {
-            $serpProvider = $this->providerManager->resolveForCapability('serp');
+        $serpProvider = $this->providerManager->resolveForCapability('serp', $website->organization_id);
+        if (($existing->isEmpty() || $forceRefresh) && $serpProvider->getName() !== 'first_party_crawl') {
             $seedQueries = $this->buildBattleQueries($website, $competitor, $tSnap, $cSnap, $country);
 
             foreach (array_slice($seedQueries, 0, 3) as $kw) {

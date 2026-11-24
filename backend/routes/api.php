@@ -294,6 +294,7 @@ Route::prefix('v1')->group(function () {
                 Route::get('/discoveries', [CompetitorAnalysisController::class, 'listDiscoveries']);
                 Route::post('/discover', [CompetitorAnalysisController::class, 'discover'])->middleware(['org.role:seo_manager', 'throttle:30,1']);
                 Route::post('/discoveries/{run}/confirm', [CompetitorAnalysisController::class, 'confirmDiscovery'])->middleware('org.role:editor');
+                Route::post('/compare-direct', [CompetitorAnalysisController::class, 'compareDirect'])->middleware('org.role:editor');
 
                 Route::post('/analyze', [CompetitorAnalysisController::class, 'launchAnalysis'])->middleware(['org.role:seo_manager', 'throttle:20,1']);
                 Route::get('/jobs', [CompetitorAnalysisController::class, 'listJobs']);

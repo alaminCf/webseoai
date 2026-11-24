@@ -206,6 +206,68 @@ class CompetitorAnalysisController extends Controller
     }
 
     /**
+     * 1-Click "Compare with My Site" from Discovery Results or any domain:
+     * Upserts the competitor cleanly into tracked competitors so the Head-to-Head Battlecard opens immediately.
+     */
+    public function compareDirect(Request $request, Website $website): JsonResponse
+    {
+        $this->authorizeWebsite($request, $website);
+        $this->requireMinimumRole($request, OrganizationMember::ROLE_EDITOR);
+
+        $validated = $request->validate([
+            'domain' => ['required', 'string', 'max:255'],
+            'display_name' => ['nullable', 'string', 'max:255'],
+            'category' => ['nullable', 'string', Rule::in(CompetitorDomain::CATEGORIES)],
+            'tier' => ['nullable', 'string', Rule::in([CompetitorDomain::TIER_PRIMARY, CompetitorDomain::TIER_SECONDARY])],
+            'country' => ['nullable', 'string', 'max:10'],
+            'language' => ['nullable', 'string', 'max:10'],
+            'discovery_confidence' => ['nullable', 'integer', 'min:0', 'max:100'],
+            'discovery_rationale' => ['nullable', 'string', 'max:1000'],
+        ]);
+
+        $domain = CompetitorDomain::normalizeDomain($validated['domain']);
+        $targetDomain = CompetitorDomain::normalizeDomain($website->domain);
+
+        if ($domain === '' || !str_contains($domain, '.')) {
+            return $this->error('Please provide a valid competitor domain.', 'INVALID_DOMAIN', null, 422);
+        }
+
+        if ($domain === $targetDomain) {
+            return $this->error('You cannot compare your website against itself.', 'SELF_DOMAIN_REJECTED', null, 422);
+        }
+
+        $competitor = CompetitorDomain::where('website_id', $website->id)
+            ->where('domain', $domain)
+            ->first();
+
+        $created = false;
+        if (!$competitor) {
+            $competitor = CompetitorDomain::create([
+                'organization_id' => $website->organization_id,
+                'website_id' => $website->id,
+                'domain' => $domain,
+                'display_name' => $validated['display_name'] ?? Str::title(str_replace('-', ' ', pathinfo($domain, PATHINFO_FILENAME))),
+                'category' => $validated['category'] ?? CompetitorDomain::CATEGORY_DIRECT,
+                'tier' => $validated['tier'] ?? CompetitorDomain::TIER_PRIMARY,
+                'country' => strtoupper($validated['country'] ?? ($website->target_country ?: 'US')),
+                'language' => strtolower($validated['language'] ?? ($website->preferred_language ?: 'en')),
+                'discovery_source' => 'serp_discovery',
+                'discovery_confidence' => $validated['discovery_confidence'] ?? null,
+                'discovery_rationale' => $validated['discovery_rationale'] ?? null,
+                'is_active' => true,
+            ]);
+            $created = true;
+        } elseif (!$competitor->is_active) {
+            $competitor->update(['is_active' => true]);
+        }
+
+        return $this->success([
+            'competitor' => $competitor->load('latestSnapshot'),
+            'created' => $created,
+        ], null, $created ? 201 : 200);
+    }
+
+    /**
      * Head-to-Head Deep Dive comparison & improvement roadmap against a specific competitor.
      */
     public function deepDive(Request $request, Website $website, CompetitorDomain $competitor): JsonResponse

@@ -4,12 +4,16 @@ namespace App\Domain\Competitors\Services;
 
 use App\Domain\Competitors\CompetitorProviderManager;
 use App\Domain\Competitors\Providers\FirstPartyCrawlProvider;
+use App\Domain\Competitors\Providers\SerperProvider;
+use App\Domain\Crawler\UrlSecurityValidator;
 use App\Models\CompetitorDomain;
 use App\Models\CompetitorDomainSnapshot;
 use App\Models\CrawledPage;
 use App\Models\SearchPerformanceRecord;
 use App\Models\Website;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Http;
+use Throwable;
 
 class DomainComparisonService
 {
@@ -225,17 +229,18 @@ class DomainComparisonService
             }
         }
 
-        // 3. Enrich with live Google Index (site:domain) & Public Web Mentions when Serper.dev / SERP provider is connected!
-        if ($this->providerManager->hasExternalProviderFor('serp')) {
-            $serpProv = $this->providerManager->resolveForCapability('serp');
-            if ($serpProv->getName() === 'serper' || $serpProv->getName() === 'serpapi') {
+        // 3. Enrich with live Google Index (site:domain) & Verified Backlinks/Web Mentions when Serper.dev / SERP provider is connected!
+        $serpProv = $this->providerManager->resolveForCapability('serp', $website->organization_id);
+        if ($serpProv->getName() === 'serper' || $serpProv->getName() === 'serpapi') {
                 // 3a. Real Google-indexed pages (site:domain)
                 $siteRes = $this->providerManager->cachedCall(
                     $website,
                     'serp',
                     "{$serpProv->getName()}:site:{$domain}:{$country}",
                     "google_index:{$domain}",
-                    fn () => $serpProv->fetchSerp("site:{$domain}", $country, $language, 'desktop'),
+                    fn () => $serpProv instanceof SerperProvider
+                        ? $serpProv->fetchSerp("site:{$domain}", $country, $language, 'desktop', null, 20)
+                        : $serpProv->fetchSerp("site:{$domain}", $country, $language, 'desktop'),
                     $forceRefresh
                 );
                 if (($siteRes['available'] ?? false) && !empty($siteRes['organic_results'])) {
@@ -277,13 +282,15 @@ class DomainComparisonService
                     }
                 }
 
-                // 3b. Real Google public web mentions / brand citations ("domain" -site:domain)
+                // 3b. Real Google referring pages & public web mentions ("domain" -site:domain) + Live HTML Backlink Verification
                 $mentionRes = $this->providerManager->cachedCall(
                     $website,
                     'serp',
-                    "{$serpProv->getName()}:mentions:{$domain}:{$country}",
+                    "{$serpProv->getName()}:mentions:{$domain}:{$country}:v2",
                     "web_mentions:{$domain}",
-                    fn () => $serpProv->fetchSerp("\"{$domain}\" -site:{$domain}", $country, $language, 'desktop'),
+                    fn () => $serpProv instanceof SerperProvider
+                        ? $serpProv->fetchSerp("\"{$domain}\" -site:{$domain}", $country, $language, 'desktop', null, 20)
+                        : $serpProv->fetchSerp("\"{$domain}\" -site:{$domain}", $country, $language, 'desktop'),
                     $forceRefresh
                 );
                 if ($mentionRes['available'] ?? false) {
@@ -291,24 +298,39 @@ class DomainComparisonService
                     $seenMentionHosts = [];
                     foreach ($mentionRes['organic_results'] ?? [] as $mRow) {
                         $mHost = CompetitorDomain::normalizeDomain((string) ($mRow['domain'] ?? ''));
-                        if ($mHost === '' || $mHost === $domain || isset($seenMentionHosts[$mHost])) {
+                        if ($mHost === '' || $mHost === $domain || str_ends_with($mHost, '.' . $domain) || isset($seenMentionHosts[$mHost])) {
                             continue;
                         }
                         $seenMentionHosts[$mHost] = true;
                         $mentions[] = [
                             'domain' => $mHost,
-                            'url' => $mRow['url'] ?? '',
-                            'title' => $mRow['title'] ?? '',
-                            'snippet' => $mRow['snippet'] ?? '',
+                            'url' => (string) ($mRow['url'] ?? ''),
+                            'title' => (string) ($mRow['title'] ?? ''),
+                            'snippet' => (string) ($mRow['snippet'] ?? ''),
+                            'verified_backlink' => false,
+                            'link_type' => 'mention',
+                            'anchor_text' => null,
+                            'destination_url' => null,
+                            'source' => 'google_web_mention',
                         ];
                     }
+
+                    // Mechanically probe top 10 external referring pages in parallel to verify actual <a href> backlinks + rel/anchor
+                    $mentions = $this->verifyExternalBacklinks($domain, array_slice($mentions, 0, 18));
+
+                    $verifiedCount = count(array_filter($mentions, fn ($m) => !empty($m['verified_backlink'])));
+                    $dofollowCount = count(array_filter($mentions, fn ($m) => ($m['link_type'] ?? '') === 'dofollow'));
+                    $nofollowCount = count(array_filter($mentions, fn ($m) => in_array($m['link_type'] ?? '', ['nofollow', 'ugc', 'sponsored'], true)));
+
                     $crawledSignals['web_mentions_count'] = count($mentions);
-                    $crawledSignals['web_mentions'] = array_slice($mentions, 0, 12);
+                    $crawledSignals['verified_backlinks_count'] = $verifiedCount;
+                    $crawledSignals['dofollow_backlinks_count'] = $dofollowCount;
+                    $crawledSignals['nofollow_backlinks_count'] = $nofollowCount;
+                    $crawledSignals['web_mentions'] = $mentions;
                 }
 
                 // Recompute on-page SEO score with Google index signals included
                 $crawledSignals['onpage_seo_score'] = FirstPartyCrawlProvider::computeOnPageSeoScore($crawledSignals);
-            }
         }
 
         $snapshot = CompetitorDomainSnapshot::create([
@@ -525,5 +547,96 @@ class DomainComparisonService
         }
 
         return ['strengths' => $strengths, 'weaknesses' => $weaknesses];
+    }
+
+    /**
+     * Mechanically probe external referring pages in parallel (SSRF-safe, 3s timeout) to verify
+     * real <a href> backlinks pointing to $targetDomain and extract exact anchor text & dofollow/nofollow rel.
+     */
+    private function verifyExternalBacklinks(string $targetDomain, array $mentions): array
+    {
+        if (empty($mentions)) {
+            return [];
+        }
+
+        $probeList = [];
+        foreach (array_slice($mentions, 0, 10) as $idx => $m) {
+            $url = (string) ($m['url'] ?? '');
+            if ($url === '' || !preg_match('#^https?://#i', $url)) {
+                continue;
+            }
+            if (!app()->runningUnitTests()) {
+                try {
+                    $host = (string) parse_url($url, PHP_URL_HOST);
+                    UrlSecurityValidator::validate($url, $host);
+                } catch (Throwable) {
+                    continue;
+                }
+            }
+            $probeList[$idx] = $url;
+        }
+
+        if (empty($probeList)) {
+            return $mentions;
+        }
+
+        try {
+            $responses = Http::pool(function ($pool) use ($probeList) {
+                foreach ($probeList as $idx => $url) {
+                    $pool->as("m{$idx}")
+                        ->withHeaders([
+                            'User-Agent' => 'Mozilla/5.0 (compatible; WebSEOAI-BacklinkVerifier/1.0)',
+                            'Accept' => 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
+                        ])
+                        ->timeout(3)
+                        ->get($url);
+                }
+            });
+
+            $escapedDomain = preg_quote($targetDomain, '#');
+            foreach ($probeList as $idx => $url) {
+                $resp = $responses["m{$idx}"] ?? null;
+                if (!$resp || ($resp instanceof Throwable) || !$resp->successful()) {
+                    continue;
+                }
+                $html = (string) $resp->body();
+                if ($html === '') {
+                    continue;
+                }
+
+                // Match <a ... href="https://(www.)?targetDomain..." ...>anchor</a>
+                if (preg_match('#<a\b([^>]*\bhref=["\'](https?://(?:[a-z0-9-]+\.)?' . $escapedDomain . '(?:/[^"\']*)?)["\'][^>]*)>(.*?)</a>#is', $html, $match)) {
+                    $attrs = strtolower((string) $match[1]);
+                    $destUrl = trim((string) $match[2]);
+                    $anchor = trim(preg_replace('/\s+/', ' ', html_entity_decode(strip_tags((string) $match[3]), ENT_QUOTES | ENT_HTML5)));
+
+                    $linkType = 'dofollow';
+                    if (preg_match('/\brel=["\']([^"\']+)["\']/i', $attrs, $relMatch)) {
+                        $relVal = strtolower($relMatch[1]);
+                        if (str_contains($relVal, 'sponsored')) {
+                            $linkType = 'sponsored';
+                        } elseif (str_contains($relVal, 'ugc')) {
+                            $linkType = 'ugc';
+                        } elseif (str_contains($relVal, 'nofollow')) {
+                            $linkType = 'nofollow';
+                        }
+                    }
+
+                    $mentions[$idx]['verified_backlink'] = true;
+                    $mentions[$idx]['link_type'] = $linkType;
+                    $mentions[$idx]['anchor_text'] = $anchor !== '' ? mb_substr($anchor, 0, 140) : $targetDomain;
+                    $mentions[$idx]['destination_url'] = $destUrl;
+                    $mentions[$idx]['source'] = 'live_html_verified_backlink';
+                }
+            }
+        } catch (Throwable) {
+            // Keep Google web mentions safely even if parallel probe fails
+        }
+
+        // Sort verified dofollow backlinks first, then nofollow, then unverified citations
+        $rankOrder = ['dofollow' => 1, 'ugc' => 2, 'sponsored' => 2, 'nofollow' => 3, 'mention' => 4];
+        usort($mentions, fn ($a, $b) => ($rankOrder[$a['link_type'] ?? 'mention'] ?? 9) <=> ($rankOrder[$b['link_type'] ?? 'mention'] ?? 9));
+
+        return $mentions;
     }
 }

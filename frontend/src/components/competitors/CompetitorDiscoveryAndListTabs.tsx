@@ -18,6 +18,7 @@ import {
   Filter,
   Link2,
   Tag,
+  GitCompare,
 } from 'lucide-react';
 import {
   Website,
@@ -398,6 +399,7 @@ export function MyCompetitorsTab({
   >({});
   const [hidePortals, setHidePortals] = useState(true);
   const [isConfirming, setIsConfirming] = useState(false);
+  const [comparingDomain, setComparingDomain] = useState<string | null>(null);
   const activeCountries = countries.length > 0 ? countries : [country || 'US'];
 
   const hydrateDiscoveryRun = (run: CompetitorDiscoveryRun) => {
@@ -433,6 +435,38 @@ export function MyCompetitorsTab({
       active = false;
     };
   }, [website.id]);
+
+  const handleCompareCandidate = async (
+    cand: NonNullable<CompetitorDiscoveryRun['candidates']>[number],
+    activeCategory: CompetitorCategory,
+    activeTier: CompetitorTier
+  ) => {
+    setComparingDomain(cand.domain);
+    try {
+      const res = await api.post<{ competitor: CompetitorDomainItem; created: boolean }>(
+        `/websites/${website.id}/competitors/compare-direct`,
+        {
+          domain: cand.domain,
+          category: activeCategory,
+          tier: activeTier,
+          country: (cand.matched_countries && cand.matched_countries[0]) || activeCountries[0] || country,
+          language,
+          discovery_confidence: cand.confidence,
+          discovery_rationale: cand.relevance_reason,
+        }
+      );
+      if (res.success && res.data?.competitor) {
+        onRefresh();
+        onSelectCompetitor?.(res.data.competitor.id);
+      } else {
+        toast.error(res.error?.message || `Could not open comparison for ${cand.domain}.`);
+      }
+    } catch {
+      toast.error('Network error opening head-to-head comparison.');
+    } finally {
+      setComparingDomain(null);
+    }
+  };
 
   const handleManualAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -945,8 +979,25 @@ export function MyCompetitorsTab({
                           </div>
                         </div>
 
-                        {/* Inline Category & Tier Controls before Confirm */}
-                        <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 shrink-0 pl-7 lg:pl-0">
+                        {/* Inline Category & Tier Controls + 1-Click Compare with My Site */}
+                        <div className="flex flex-wrap items-center gap-2 shrink-0 pl-7 lg:pl-0">
+                          {onSelectCompetitor && (
+                            <button
+                              type="button"
+                              disabled={comparingDomain === cand.domain}
+                              onClick={() => handleCompareCandidate(cand, activeCategory, activeTier)}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white text-[11px] font-semibold shadow-sm transition whitespace-nowrap"
+                            >
+                              {comparingDomain === cand.domain ? (
+                                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <GitCompare className="w-3.5 h-3.5" />
+                              )}
+                              <span>
+                                {comparingDomain === cand.domain ? 'Opening...' : 'Compare with My Site'}
+                              </span>
+                            </button>
+                          )}
                           {!cand.already_tracked && (
                             <>
                               <select
@@ -1077,9 +1128,10 @@ export function MyCompetitorsTab({
                           <button
                             type="button"
                             onClick={() => onSelectCompetitor(comp.id)}
-                            className="px-2.5 py-1 text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-lg transition"
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-lg transition"
                           >
-                            Compare &amp; Improve
+                            <GitCompare className="w-3 h-3" />
+                            Compare with My Site
                           </button>
                         )}
                         <button

@@ -1355,3 +1355,272 @@ export function downloadLiveSerpCsv(serp: {
   setTimeout(() => URL.revokeObjectURL(url), 1500);
   return filename;
 }
+
+/**
+ * Download an executive Head-to-Head Competitor Comparison PDF (including Backlinks, Scorecard, Keywords & Roadmap).
+ */
+export async function downloadCompetitorComparisonPdf(
+  deepDive: any,
+  branding?: {
+    brand_name?: string;
+    logo_url?: string | null;
+    primary_color?: string;
+    footer_text?: string;
+  } | null
+): Promise<string> {
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const margin = 14;
+
+  const brandRgb = hexToRgb(branding?.primary_color || '#10b981');
+  const darkSlate: [number, number, number] = [15, 23, 42];
+  const lightBg: [number, number, number] = [248, 250, 252];
+  const borderColor: [number, number, number] = [226, 232, 240];
+  const loadedLogo = await loadLogoForPdf(branding?.logo_url);
+
+  const targetDom = deepDive?.target?.domain || 'your-site.com';
+  const compDom = deepDive?.competitor?.domain || 'competitor.com';
+  const summary = deepDive?.summary || {};
+  const scorecard: any[] = deepDive?.scorecard || [];
+  const bl = deepDive?.backlink_comparison || {};
+  const blSum = bl?.summary || {};
+  const gapLinks: any[] = bl?.gap_links || [];
+  const battles: any[] = deepDive?.keyword_battles || [];
+  const improvements: any[] = deepDive?.improvements || [];
+
+  const bannerH = loadedLogo ? 46 : 40;
+  doc.setFillColor(...darkSlate);
+  doc.rect(0, 0, pageWidth, bannerH, 'F');
+  doc.setFillColor(...brandRgb);
+  doc.rect(0, bannerH, pageWidth, 2, 'F');
+
+  if (loadedLogo) {
+    const box = fitLogoBox(loadedLogo, 34, 11);
+    doc.setFillColor(255, 255, 255);
+    doc.roundedRect(margin, 5.5, box.w + 4, box.h + 2.8, 1.8, 1.8, 'F');
+    doc.addImage(loadedLogo.dataUrl, loadedLogo.format, margin + 2, 5.5 + 1.4, box.w, box.h, undefined, 'FAST');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.5);
+    doc.setTextColor(148, 163, 184);
+    doc.text('HEAD-TO-HEAD COMPETITOR REPORT', pageWidth - margin, 11.5, { align: 'right' });
+  } else {
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(...brandRgb);
+    doc.text(`${(branding?.brand_name || 'WEB SEO AI').toUpperCase()}  •  HEAD-TO-HEAD COMPARISON`, margin, 11);
+  }
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(15);
+  doc.setTextColor(255, 255, 255);
+  doc.text(`${truncateText(targetDom, 28)}  vs  ${truncateText(compDom, 28)}`, margin, loadedLogo ? 26 : 21);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(203, 213, 225);
+  doc.text(
+    `Score: ${deepDive?.target?.seo_score ?? '-'} vs ${deepDive?.competitor?.seo_score ?? '-'}  |  Wins: ${summary.wins ?? 0}  •  Ties: ${summary.ties ?? 0}  •  Gaps: ${summary.gaps ?? 0}`,
+    margin,
+    loadedLogo ? 35 : 30
+  );
+  doc.setFontSize(8);
+  doc.text(`Generated: ${formatDateReadable(new Date().toISOString())}`, pageWidth - margin, loadedLogo ? 35 : 30, { align: 'right' });
+
+  let y = bannerH + 10;
+  const getFinalY = (fb: number) =>
+    ((doc as unknown as { lastAutoTable?: { finalY?: number } }).lastAutoTable?.finalY ?? fb) + 8;
+
+  // 1. Scorecard Table
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.setTextColor(...darkSlate);
+  doc.text('1. Full Head-to-Head SEO & Backlink Metrics Scorecard', margin, y);
+  y += 3;
+
+  autoTable(doc, {
+    startY: y,
+    margin: { left: margin, right: margin },
+    head: [['SEO Signal', `Your Site (${targetDom})`, `Competitor (${compDom})`, 'Status']],
+    body: scorecard.map((r) => [
+      r.metric,
+      r.target_display,
+      r.competitor_display,
+      r.winner === 'target' ? 'You Lead' : r.winner === 'competitor' ? 'Competitor Ahead' : r.winner === 'tie' ? 'Tie' : 'N/A',
+    ]),
+    styles: { fontSize: 8, cellPadding: 2.2, lineColor: borderColor, lineWidth: 0.15 },
+    headStyles: { fillColor: darkSlate, textColor: [255, 255, 255], fontStyle: 'bold' },
+    alternateRowStyles: { fillColor: lightBg },
+  });
+  y = getFinalY(y);
+
+  // 2. Backlinks & Referring Domains Gap
+  if (y > pageHeight - 40) {
+    doc.addPage();
+    y = 20;
+  }
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.setTextColor(...darkSlate);
+  doc.text(
+    `2. Backlinks & Referring Domains Gap (You: ${blSum.target_referring_domains ?? 0} vs Them: ${blSum.competitor_referring_domains ?? 0})`,
+    margin,
+    y
+  );
+  y += 3;
+
+  if (gapLinks.length > 0) {
+    autoTable(doc, {
+      startY: y,
+      margin: { left: margin, right: margin },
+      head: [['Referring Domain', 'Link Type', 'Anchor Text', 'Linking Page URL']],
+      body: gapLinks.slice(0, 20).map((g) => [
+        g.referring_domain,
+        String(g.link_type || 'mention').toUpperCase(),
+        truncateText(g.anchor_text || g.title || '-', 32),
+        truncateText((g.referring_url || '').replace(/^https?:\/\//, ''), 48),
+      ]),
+      styles: { fontSize: 7.8, cellPadding: 2.1, lineColor: borderColor, lineWidth: 0.15 },
+      headStyles: { fillColor: darkSlate, textColor: [255, 255, 255], fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: lightBg },
+    });
+    y = getFinalY(y);
+  } else {
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(8.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text('No unshared competitor backlink domains detected in this scan.', margin, y + 4);
+    y += 10;
+  }
+
+  // 3. Keyword Battles
+  if (battles.length > 0) {
+    if (y > pageHeight - 40) {
+      doc.addPage();
+      y = 20;
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.setTextColor(...darkSlate);
+    doc.text('3. Google Keyword Ranking Battles', margin, y);
+    y += 3;
+
+    autoTable(doc, {
+      startY: y,
+      margin: { left: margin, right: margin },
+      head: [['Keyword', 'Your Rank', 'Competitor Rank', 'Gap']],
+      body: battles.slice(0, 20).map((b) => [
+        truncateText(b.keyword, 54),
+        b.target_position ? `#${b.target_position}` : 'Not Top 20',
+        b.competitor_position ? `#${b.competitor_position}` : '-',
+        String(b.gap_type || '').toUpperCase(),
+      ]),
+      styles: { fontSize: 8, cellPadding: 2.2, lineColor: borderColor, lineWidth: 0.15 },
+      headStyles: { fillColor: darkSlate, textColor: [255, 255, 255], fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: lightBg },
+    });
+    y = getFinalY(y);
+  }
+
+  // 4. Prioritized Improvement Roadmap
+  if (improvements.length > 0) {
+    if (y > pageHeight - 40) {
+      doc.addPage();
+      y = 20;
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.setTextColor(...darkSlate);
+    doc.text(`4. Action Plan to Outrank ${compDom}`, margin, y);
+    y += 3;
+
+    autoTable(doc, {
+      startY: y,
+      margin: { left: margin, right: margin },
+      head: [['Priority', 'Improvement', 'Your Current', 'Competitor Benchmark']],
+      body: improvements.map((imp) => [
+        String(imp.priority || '').toUpperCase(),
+        truncateText(imp.title, 44),
+        truncateText(imp.your_current, 36),
+        truncateText(imp.competitor_benchmark, 38),
+      ]),
+      styles: { fontSize: 7.8, cellPadding: 2.1, lineColor: borderColor, lineWidth: 0.15 },
+      headStyles: { fillColor: darkSlate, textColor: [255, 255, 255], fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: lightBg },
+    });
+  }
+
+  const totalPages = doc.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    doc.setFontSize(7.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text(
+      branding?.footer_text || `Head-to-Head SEO Comparison: ${targetDom} vs ${compDom}`,
+      margin,
+      pageHeight - 7
+    );
+    doc.text(`Page ${p} of ${totalPages}`, pageWidth - margin, pageHeight - 7, { align: 'right' });
+  }
+
+  const filename = `${slugifyDomain(targetDom)}-vs-${slugifyDomain(compDom)}-comparison.pdf`;
+  doc.save(filename);
+  return filename;
+}
+
+/**
+ * Download Head-to-Head Competitor Comparison (Scorecard + Backlinks + Keywords + Improvements) as UTF-8 BOM CSV.
+ */
+export function downloadCompetitorComparisonCsv(deepDive: any): string {
+  const esc = (v: unknown) => {
+    const s = String(v ?? '').replace(/\r?\n/g, ' ').trim();
+    const safe = /^[=+\-@\t]/.test(s) && Number.isNaN(Number(s)) ? `'${s}` : s;
+    return `"${safe.replace(/"/g, '""')}"`;
+  };
+
+  const targetDom = deepDive?.target?.domain || 'your-site.com';
+  const compDom = deepDive?.competitor?.domain || 'competitor.com';
+  const rows: unknown[][] = [
+    ['Section', 'Metric / Domain / Keyword', `Your Site (${targetDom})`, `Competitor (${compDom})`, 'Status / Type', 'Detail / URL'],
+  ];
+
+  for (const r of deepDive?.scorecard || []) {
+    rows.push(['Scorecard', r.metric, r.target_display, r.competitor_display, r.winner, r.source_label]);
+  }
+  for (const g of deepDive?.backlink_comparison?.gap_links || []) {
+    rows.push(['Backlink Gap', g.referring_domain, 'Missing', g.link_type, g.anchor_text || '-', g.referring_url]);
+  }
+  for (const c of deepDive?.backlink_comparison?.competitor_links || []) {
+    rows.push(['Competitor Backlink', c.referring_domain, '-', c.link_type, c.anchor_text || '-', c.referring_url]);
+  }
+  for (const t of deepDive?.backlink_comparison?.target_links || []) {
+    rows.push(['Your Backlink', t.referring_domain, t.link_type, '-', t.anchor_text || '-', t.referring_url]);
+  }
+  for (const b of deepDive?.keyword_battles || []) {
+    rows.push([
+      'Keyword Battle',
+      b.keyword,
+      b.target_position ? `#${b.target_position}` : 'Not Top 20',
+      b.competitor_position ? `#${b.competitor_position}` : '-',
+      b.winner,
+      b.competitor_url || b.target_url || '-',
+    ]);
+  }
+  for (const imp of deepDive?.improvements || []) {
+    rows.push(['Improvement', imp.title, imp.your_current, imp.competitor_benchmark, imp.priority, imp.expected_impact]);
+  }
+
+  const csv = '\uFEFF' + rows.map((row) => row.map(esc).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const filename = `${slugifyDomain(targetDom)}-vs-${slugifyDomain(compDom)}-comparison.csv`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+  return filename;
+}
+
