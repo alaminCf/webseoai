@@ -55,9 +55,11 @@ Route::prefix('v1')->group(function () {
     });
 
     // Public / Rate-limited Auth Endpoints
-    Route::prefix('auth')->middleware('throttle:10,1')->group(function () {
+    Route::prefix('auth')->middleware('throttle:20,1')->group(function () {
         Route::post('/register', [AuthController::class, 'register']);
         Route::post('/login', [AuthController::class, 'login']);
+        Route::get('/google/url', [AuthController::class, 'googleUrl']);
+        Route::get('/google/callback', [AuthController::class, 'googleCallback']);
         Route::post('/forgot-password', [AuthController::class, 'forgotPassword']);
         Route::post('/reset-password', [AuthController::class, 'resetPassword']);
     });
@@ -83,6 +85,8 @@ Route::prefix('v1')->group(function () {
     Route::middleware('auth:sanctum')->group(function () {
         // User Profile & Session
         Route::get('/auth/me', [AuthController::class, 'me']);
+        Route::put('/auth/profile', [AuthController::class, 'updateProfile']);
+        Route::put('/auth/password', [AuthController::class, 'updatePassword']);
         Route::post('/auth/logout', [AuthController::class, 'logout']);
 
         // Organizations (Global user list & creation)

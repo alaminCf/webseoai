@@ -2,17 +2,13 @@
 
 import React, { useState } from 'react';
 import {
-  Settings,
+  UserCircle2,
   CreditCard,
   Users,
-  Palette,
-  ShieldAlert,
   Clock,
-  Sparkles,
-  Building2,
-  Trash2,
 } from 'lucide-react';
 import { Website } from '@/types';
+import { ProfileSettingsView } from './ProfileSettingsView';
 import { BillingAndAgencyView } from './BillingAndAgencyView';
 import { TeamView } from './TeamView';
 import { ActivityView } from './ActivityView';
@@ -24,12 +20,24 @@ interface UnifiedSettingsViewProps {
 export function UnifiedSettingsView({
   selectedWebsite,
 }: UnifiedSettingsViewProps) {
-  const [subTab, setSubTab] = useState<'billing' | 'team' | 'audit_trail'>('billing');
+  const [subTab, setSubTab] = useState<'profile' | 'billing' | 'team' | 'audit_trail'>('profile');
 
   return (
     <div className="space-y-6 animate-in fade-in duration-300">
       {/* Sub Tabs Navigation */}
-      <div className="flex items-center gap-2 border-b border-zinc-800 pb-3 text-xs">
+      <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 pb-3 text-xs">
+        <button
+          onClick={() => setSubTab('profile')}
+          className={`px-3.5 py-2 rounded-xl font-medium transition flex items-center gap-2 ${
+            subTab === 'profile'
+              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+              : 'text-zinc-400 hover:text-zinc-200'
+          }`}
+        >
+          <UserCircle2 className="w-3.5 h-3.5" />
+          <span>My Profile</span>
+        </button>
+
         <button
           onClick={() => setSubTab('billing')}
           className={`px-3.5 py-2 rounded-xl font-medium transition flex items-center gap-2 ${
@@ -39,7 +47,7 @@ export function UnifiedSettingsView({
           }`}
         >
           <CreditCard className="w-3.5 h-3.5" />
-          <span>Plans, Billing & Agency Hub</span>
+          <span>Plans, Billing &amp; Agency Hub</span>
         </button>
 
         <button
@@ -51,7 +59,7 @@ export function UnifiedSettingsView({
           }`}
         >
           <Users className="w-3.5 h-3.5" />
-          <span>Team Members & Roles</span>
+          <span>Team Members &amp; Roles</span>
         </button>
 
         <button
@@ -63,11 +71,13 @@ export function UnifiedSettingsView({
           }`}
         >
           <Clock className="w-3.5 h-3.5" />
-          <span>Audit Trail & Activity</span>
+          <span>Audit Trail &amp; Activity</span>
         </button>
       </div>
 
       {/* Render Selected Sub View */}
+      {subTab === 'profile' && <ProfileSettingsView />}
+
       {subTab === 'billing' && (
         <BillingAndAgencyView selectedWebsite={selectedWebsite} />
       )}

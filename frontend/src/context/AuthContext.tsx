@@ -23,6 +23,8 @@ interface AuthContextType {
     passwordConfirmation: string,
     organizationName?: string
   ) => Promise<AuthActionResult>;
+  signInWithGoogle: () => Promise<AuthActionResult>;
+  updateUserProfile: (updated: User) => void;
   logout: () => Promise<void>;
   switchOrganization: (orgId: number) => void;
   refreshOrganizations: () => Promise<void>;
@@ -56,7 +58,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const toast = useToast();
 
-  const fetchUserProfile = useCallback(async () => {
+  const fetchUserProfile = useCallback(async (googleLoginWelcome?: { isNew: boolean }) => {
     const token = api.getToken();
     if (!token) {
       setIsLoading(false);
@@ -81,6 +83,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           setCurrentOrganization(active);
           api.setOrganizationId(active.id);
         }
+
+        if (googleLoginWelcome) {
+          toast.success(
+            googleLoginWelcome.isNew
+              ? `Welcome to Web SEO AI, ${res.data.user.name}! Your workspace is ready.`
+              : `Signed in with Google as ${res.data.user.name}.`
+          );
+        }
       } else {
         // Token expired or invalid
         api.setToken(null);
@@ -93,9 +103,29 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [toast]);
 
   useEffect(() => {
+    // Check for 1-click Google OAuth callback token delivered via URL fragment (#)
+    if (typeof window !== 'undefined' && window.location.hash.includes('google_auth_token=')) {
+      const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+      const gToken = hashParams.get('google_auth_token');
+      const gOrg = hashParams.get('google_auth_org');
+      const gNew = hashParams.get('google_auth_new') === '1';
+
+      // Immediately scrub sensitive token from browser URL bar & history
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+
+      if (gToken) {
+        api.setToken(gToken);
+        if (gOrg && !Number.isNaN(parseInt(gOrg, 10))) {
+          api.setOrganizationId(parseInt(gOrg, 10));
+        }
+        fetchUserProfile({ isNew: gNew });
+        return;
+      }
+    }
+
     fetchUserProfile();
   }, [fetchUserProfile]);
 
@@ -175,6 +205,67 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const signInWithGoogle = async (): Promise<AuthActionResult> => {
+    try {
+      const res = await api.get<{
+        authorization_url: string;
+        oauth_mode: 'live' | 'sandbox';
+      }>('/auth/google/url');
+
+      if (!res.success || !res.data?.authorization_url) {
+        const msg = extractApiError(res.error, 'Could not start Google Sign-In. Please try again.');
+        toast.error(msg);
+        return { success: false, error: msg };
+      }
+
+      const authUrl = res.data.authorization_url;
+      if (res.data.oauth_mode === 'sandbox' && authUrl.includes('/auth/google/callback?')) {
+        // Local dev sandbox direct JSON callback
+        setIsLoading(true);
+        try {
+          const relativeEndpoint = authUrl.replace(/^https?:\/\/[^/]+/, '').replace(/^\/api\/v1/, '');
+          const cbRes = await api.get<{
+            user: User;
+            token: string;
+            organizations: Organization[];
+            current_organization: Organization;
+            is_new?: boolean;
+          }>(relativeEndpoint);
+
+          if (cbRes.success && cbRes.data) {
+            api.setToken(cbRes.data.token);
+            setUser(cbRes.data.user);
+            setOrganizations(cbRes.data.organizations || []);
+            const activeOrg = cbRes.data.current_organization || cbRes.data.organizations[0] || null;
+            setCurrentOrganization(activeOrg);
+            if (activeOrg) {
+              api.setOrganizationId(activeOrg.id);
+            }
+            toast.success(`Signed in with Google as ${cbRes.data.user.name}.`);
+            return { success: true };
+          }
+          const msg = extractApiError(cbRes.error, 'Google Sign-In failed.');
+          toast.error(msg);
+          return { success: false, error: msg };
+        } finally {
+          setIsLoading(false);
+        }
+      }
+
+      // Live Google OAuth 2.0 redirect
+      window.location.href = authUrl;
+      return { success: true };
+    } catch {
+      const msg = 'Could not reach Google Sign-In service.';
+      toast.error(msg);
+      return { success: false, error: msg };
+    }
+  };
+
+  const updateUserProfile = (updated: User) => {
+    setUser(updated);
+  };
+
   const logout = async () => {
     try {
       await api.post('/auth/logout');
@@ -219,6 +310,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         isLoading,
         login,
         register,
+        signInWithGoogle,
+        updateUserProfile,
         logout,
         switchOrganization,
         refreshOrganizations,

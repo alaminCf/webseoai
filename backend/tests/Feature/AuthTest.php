@@ -6,6 +6,7 @@ use App\Models\Organization;
 use App\Models\OrganizationMember;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
 class AuthTest extends TestCase
@@ -212,5 +213,94 @@ class AuthTest extends TestCase
             ]);
 
         $this->assertDatabaseCount('personal_access_tokens', 0);
+    }
+
+    public function test_google_one_click_signin_creates_user_with_google_avatar_and_redirects_with_token(): void
+    {
+        config([
+            'search_console.client_id' => 'test-google-client.apps.googleusercontent.com',
+            'search_console.client_secret' => 'test-google-secret',
+            'search_console.redirect_uri' => 'https://webseoai.vercel.app/api/v1/integrations/google-search-console/callback',
+            'search_console.frontend_url' => 'https://webseoai.vercel.app',
+        ]);
+
+        // 1. Request Google Sign-In authorization URL
+        $urlRes = $this->getJson('/api/v1/auth/google/url');
+        $urlRes->assertOk()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('data.oauth_mode', 'live');
+
+        $authUrl = $urlRes->json('data.authorization_url');
+        $this->assertStringStartsWith('https://accounts.google.com/o/oauth2/v2/auth?', $authUrl);
+        parse_str(parse_url($authUrl, PHP_URL_QUERY), $queryParams);
+        $this->assertArrayHasKey('state', $queryParams);
+        $this->assertStringContainsString('openid email profile', $queryParams['scope']);
+
+        // 2. Mock Google token exchange + userinfo endpoint (with Google profile picture)
+        Http::fake([
+            'https://oauth2.googleapis.com/token' => Http::response([
+                'access_token' => 'google_login_access_token_xyz',
+                'token_type' => 'Bearer',
+                'expires_in' => 3600,
+            ], 200),
+            'https://www.googleapis.com/oauth2/v3/userinfo' => Http::response([
+                'sub' => 'google_sub_987654321',
+                'email' => 'Maya.Patel@Agency.io',
+                'email_verified' => true,
+                'name' => 'Maya Patel',
+                'picture' => 'https://lh3.googleusercontent.com/a/maya-photo=s256-c',
+            ], 200),
+        ]);
+
+        // 3. Simulate browser redirect hitting the shared already-authorized Google callback URI
+        $cbRes = $this->get('/api/v1/integrations/google-search-console/callback?code=real_google_code&state=' . urlencode($queryParams['state']));
+        $cbRes->assertStatus(302);
+        $location = (string) $cbRes->headers->get('Location');
+        $this->assertStringStartsWith('https://webseoai.vercel.app/#google_auth_token=', $location);
+        $this->assertStringContainsString('google_auth_new=1', $location);
+
+        // Verify user & Google profile picture & isolated workspace were created
+        $user = User::where('email', 'maya.patel@agency.io')->first();
+        $this->assertNotNull($user);
+        $this->assertEquals('Maya Patel', $user->name);
+        $this->assertEquals('google_sub_987654321', $user->google_id);
+        $this->assertEquals('https://lh3.googleusercontent.com/a/maya-photo=s256-c', $user->avatar_url);
+        $this->assertEquals('google', $user->auth_provider);
+        $this->assertEquals(1, $user->memberships()->count());
+
+        // 4. Verify Google user can edit their profile and upload a custom PNG avatar
+        $tinyPng = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+        $updateRes = $this->actingAs($user)
+            ->putJson('/api/v1/auth/profile', [
+                'name' => 'Maya Patel (SEO Lead)',
+                'job_title' => 'Head of SEO',
+                'phone' => '+65 9876 5432',
+                'bio' => 'Leading organic growth.',
+                'avatar_url' => $tinyPng,
+            ]);
+
+        $updateRes->assertOk()
+            ->assertJsonPath('data.user.name', 'Maya Patel (SEO Lead)')
+            ->assertJsonPath('data.user.job_title', 'Head of SEO')
+            ->assertJsonPath('data.user.avatar_url', $tinyPng)
+            ->assertJsonPath('data.user.google_connected', true);
+
+        // 5. Verify Google-only user can set an initial account password without current_password
+        $pwdRes = $this->actingAs($user->fresh())
+            ->putJson('/api/v1/auth/password', [
+                'password' => 'MyNewPass123',
+                'password_confirmation' => 'MyNewPass123',
+            ]);
+
+        $pwdRes->assertOk()
+            ->assertJsonPath('data.user.auth_provider', 'google+email');
+
+        // And can now log in with email/password too
+        $loginRes = $this->postJson('/api/v1/auth/login', [
+            'email' => 'maya.patel@agency.io',
+            'password' => 'MyNewPass123',
+        ]);
+        $loginRes->assertOk()
+            ->assertJsonPath('data.user.avatar_url', $tinyPng);
     }
 }

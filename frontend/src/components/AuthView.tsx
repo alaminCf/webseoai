@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import {
   Sparkles,
@@ -28,7 +28,34 @@ export function AuthView() {
   const [showPassword, setShowPassword] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const { login, register } = useAuth();
+  const [isGoogleLoading, setIsGoogleLoading] = useState(false);
+  const { login, register, signInWithGoogle } = useAuth();
+
+  // Surface any Google OAuth cancellation/error passed via ?auth_error=...
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const authErr = params.get('auth_error');
+    if (authErr) {
+      setFormError(authErr);
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
+
+  const handleGoogleSignIn = async () => {
+    setFormError(null);
+    setIsGoogleLoading(true);
+    try {
+      const result = await signInWithGoogle();
+      if (!result.success && result.error) {
+        setFormError(result.error);
+        setIsGoogleLoading(false);
+      }
+    } catch {
+      setFormError('Could not initiate Google Sign-In. Please try again.');
+      setIsGoogleLoading(false);
+    }
+  };
 
   const isRegister = mode === 'register';
 
@@ -143,6 +170,50 @@ export function AuthView() {
               <span>{formError}</span>
             </div>
           )}
+
+          {/* 1-Click Google Sign-In Button */}
+          <button
+            type="button"
+            onClick={handleGoogleSignIn}
+            disabled={isGoogleLoading || isSubmitting}
+            className="w-full py-2.5 px-4 bg-white hover:bg-zinc-100 text-zinc-900 border border-zinc-200 rounded-xl text-xs font-semibold shadow-sm transition flex items-center justify-center gap-2.5 disabled:opacity-60"
+          >
+            <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                fill="#4285F4"
+                d="M23.49 12.27c0-.79-.07-1.54-.2-2.27H12v4.51h6.47c-.29 1.48-1.14 2.73-2.4 3.58v3h3.86c2.26-2.09 3.56-5.17 3.56-8.82z"
+              />
+              <path
+                fill="#34A853"
+                d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.86-3c-1.08.72-2.45 1.16-4.07 1.16-3.13 0-5.78-2.11-6.73-4.96H1.29v3.09C3.26 21.3 7.31 24 12 24z"
+              />
+              <path
+                fill="#FBBC05"
+                d="M5.27 14.29c-.25-.72-.38-1.49-.38-2.29s.14-1.57.38-2.29V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.98-3.09z"
+              />
+              <path
+                fill="#EA4335"
+                d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.98 3.09c.95-2.85 3.6-4.96 6.73-4.96z"
+              />
+            </svg>
+            <span>
+              {isGoogleLoading
+                ? 'Connecting to Google...'
+                : isRegister
+                  ? 'Sign up with Google (1-Click)'
+                  : 'Continue with Google'}
+            </span>
+          </button>
+
+          {/* Divider */}
+          <div className="relative my-5">
+            <div className="absolute inset-0 flex items-center">
+              <div className="w-full border-t border-zinc-800" />
+            </div>
+            <div className="relative flex justify-center text-[11px]">
+              <span className="px-3 bg-zinc-950 text-zinc-500">or continue with email</span>
+            </div>
+          </div>
 
           <form onSubmit={handleSubmit} className="space-y-4">
             {isRegister && (

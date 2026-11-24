@@ -22,6 +22,13 @@ class User extends Authenticatable
     protected $fillable = [
         'name',
         'email',
+        'google_id',
+        'avatar_url',
+        'job_title',
+        'phone',
+        'bio',
+        'auth_provider',
+        'email_verified_at',
         'password',
     ];
 
@@ -74,5 +81,24 @@ class User extends Authenticatable
         $orgId = $organization instanceof Organization ? $organization->id : $organization;
         $membership = $this->memberships()->where('organization_id', $orgId)->first();
         return $membership?->role;
+    }
+
+    /**
+     * Standardized API profile payload for auth and profile endpoints.
+     */
+    public function toProfileArray(): array
+    {
+        return [
+            'id' => $this->id,
+            'name' => $this->name,
+            'email' => $this->email,
+            'avatar_url' => $this->avatar_url,
+            'job_title' => $this->job_title,
+            'phone' => $this->phone,
+            'bio' => $this->bio,
+            'auth_provider' => $this->auth_provider ?: ($this->google_id ? 'google' : 'email'),
+            'google_connected' => !empty($this->google_id),
+            'created_at' => $this->created_at?->toIso8601String(),
+        ];
     }
 }

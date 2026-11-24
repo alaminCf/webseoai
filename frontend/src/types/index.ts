@@ -10,6 +10,13 @@ export interface User {
   id: number;
   name: string;
   email: string;
+  avatar_url?: string | null;
+  job_title?: string | null;
+  phone?: string | null;
+  bio?: string | null;
+  auth_provider?: 'email' | 'google' | 'google+email' | string;
+  google_connected?: boolean;
+  created_at?: string | null;
 }
 
 export interface Organization {

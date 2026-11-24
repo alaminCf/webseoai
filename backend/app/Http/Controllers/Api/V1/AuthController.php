@@ -2,17 +2,20 @@
 
 namespace App\Http\Controllers\Api\V1;
 
+use App\Domain\Auth\GoogleAuthService;
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
 use App\Models\Organization;
 use App\Models\OrganizationMember;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rules\Password;
+use Throwable;
 
 class AuthController extends Controller
 {
@@ -103,11 +106,7 @@ class AuthController extends Controller
             ];
 
             return $this->success([
-                'user' => [
-                    'id' => $user->id,
-                    'name' => $user->name,
-                    'email' => $user->email,
-                ],
+                'user' => $user->toProfileArray(),
                 'token' => $token,
                 'organizations' => [$orgPayload],
                 'current_organization' => $orgPayload,
@@ -169,15 +168,81 @@ class AuthController extends Controller
         }
 
         return $this->success([
-            'user' => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-            ],
+            'user' => $user->toProfileArray(),
             'token' => $token,
             'organizations' => $organizations,
             'current_organization' => $defaultOrg,
         ]);
+    }
+
+    /**
+     * Generate 1-click Google Sign-In OAuth URL.
+     */
+    public function googleUrl(GoogleAuthService $googleAuth): JsonResponse
+    {
+        return $this->success([
+            'authorization_url' => $googleAuth->getAuthorizationUrl(),
+            'oauth_mode' => $googleAuth->isLiveConfigured() ? 'live' : 'sandbox',
+            'redirect_uri' => $googleAuth->getRedirectUri(),
+        ]);
+    }
+
+    /**
+     * Handle Google Sign-In OAuth callback (browser redirect or JSON sandbox).
+     */
+    public function googleCallback(Request $request, GoogleAuthService $googleAuth): JsonResponse|RedirectResponse
+    {
+        $code = (string) $request->query('code', '');
+        $state = (string) $request->query('state', '');
+        $oauthError = (string) $request->query('error', '');
+        $isApiCall = $request->expectsJson() || str_starts_with($code, 'sandbox_');
+        $frontendBase = rtrim((string) (config('search_console.frontend_url') ?: url('/')), '/');
+
+        if ($oauthError !== '') {
+            $reason = $request->query('error_description') ?: 'Google Sign-In was cancelled.';
+            if ($isApiCall) {
+                return $this->error($reason, 'GOOGLE_AUTH_DENIED', null, 400);
+            }
+            return redirect()->away($frontendBase . '/?' . http_build_query(['auth_error' => $reason]));
+        }
+
+        if ($code === '' || $state === '') {
+            $reason = 'Missing required Google Sign-In parameters.';
+            if ($isApiCall) {
+                return $this->error($reason, 'VALIDATION_FAILED', null, 422);
+            }
+            return redirect()->away($frontendBase . '/?' . http_build_query(['auth_error' => $reason]));
+        }
+
+        try {
+            $result = $googleAuth->handleCallback($code, $state, $request);
+
+            if ($isApiCall) {
+                return $this->success([
+                    'user' => $result['user']->toProfileArray(),
+                    'token' => $result['token'],
+                    'organizations' => $result['organizations'],
+                    'current_organization' => $result['current_organization'],
+                    'is_new' => $result['is_new'],
+                ]);
+            }
+
+            // Deliver Sanctum token cleanly via URL fragment (#) so it is never leaked in HTTP logs or Referer headers
+            $fragment = http_build_query([
+                'google_auth_token' => $result['token'],
+                'google_auth_org' => $result['current_organization']['id'] ?? '',
+                'google_auth_new' => $result['is_new'] ? '1' : '0',
+            ]);
+
+            return redirect()->away($frontendBase . '/#' . $fragment);
+        } catch (Throwable $e) {
+            if ($isApiCall) {
+                return $this->error($e->getMessage(), 'GOOGLE_AUTH_FAILED', null, 400);
+            }
+            return redirect()->away($frontendBase . '/?' . http_build_query([
+                'auth_error' => $e->getMessage(),
+            ]));
+        }
     }
 
     /**
@@ -207,20 +272,132 @@ class AuthController extends Controller
             ->where('user_id', $user->id)
             ->get();
 
-        $organizations = $memberships->map(fn($m) => [
-            'id' => $m->organization->id,
-            'name' => $m->organization->name,
-            'slug' => $m->organization->slug,
-            'role' => $m->role,
-        ]);
+        $organizations = $memberships
+            ->filter(fn ($m) => $m->organization !== null)
+            ->map(fn ($m) => [
+                'id' => $m->organization->id,
+                'name' => $m->organization->name,
+                'slug' => $m->organization->slug,
+                'role' => $m->role,
+            ])
+            ->values();
 
         return $this->success([
-            'user' => [
-                'id' => $user->id,
-                'name' => $user->name,
-                'email' => $user->email,
-            ],
+            'user' => $user->toProfileArray(),
             'organizations' => $organizations,
+        ]);
+    }
+
+    /**
+     * Update authenticated user's profile (name, job title, phone, bio, avatar).
+     */
+    public function updateProfile(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        $request->merge([
+            'name' => trim((string) $request->input('name', $user->name)),
+            'job_title' => $request->has('job_title') ? trim((string) $request->input('job_title', '')) : $user->job_title,
+            'phone' => $request->has('phone') ? trim((string) $request->input('phone', '')) : $user->phone,
+            'bio' => $request->has('bio') ? trim((string) $request->input('bio', '')) : $user->bio,
+        ]);
+
+        $validated = $request->validate([
+            'name' => ['required', 'string', 'min:2', 'max:255'],
+            'job_title' => ['nullable', 'string', 'max:120'],
+            'phone' => ['nullable', 'string', 'max:40'],
+            'bio' => ['nullable', 'string', 'max:500'],
+            'avatar_url' => [
+                'nullable',
+                'string',
+                'max:650000',
+                function (string $attribute, mixed $value, \Closure $fail) {
+                    if ($value === null || $value === '') {
+                        return;
+                    }
+                    $str = (string) $value;
+                    $isHttpUrl = (bool) preg_match('/^https?:\/\/.+/i', $str) && strlen($str) <= 2048;
+                    $isRasterDataUri = (bool) preg_match('/^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+\/=]+$/i', $str);
+                    if (!$isHttpUrl && !$isRasterDataUri) {
+                        $fail('Profile picture must be a valid image upload (PNG, JPG, WebP) or HTTPS image URL.');
+                    }
+                },
+            ],
+        ]);
+
+        $updates = [
+            'name' => $validated['name'],
+            'job_title' => $validated['job_title'] !== '' ? $validated['job_title'] : null,
+            'phone' => $validated['phone'] !== '' ? $validated['phone'] : null,
+            'bio' => $validated['bio'] !== '' ? $validated['bio'] : null,
+        ];
+
+        if ($request->has('avatar_url')) {
+            $avatarVal = trim((string) ($validated['avatar_url'] ?? ''));
+            $updates['avatar_url'] = $avatarVal !== '' ? $avatarVal : null;
+        }
+
+        $user->update($updates);
+
+        $orgId = $request->header('X-Organization-Id') ?: $user->memberships()->value('organization_id');
+        if ($orgId) {
+            AuditLog::record(
+                (int) $orgId,
+                $user->id,
+                'user.profile_updated',
+                $user,
+                null,
+                ['name' => $user->name, 'job_title' => $user->job_title],
+                $request
+            );
+        }
+
+        return $this->success([
+            'message' => 'Profile updated successfully.',
+            'user' => $user->fresh()->toProfileArray(),
+        ]);
+    }
+
+    /**
+     * Change password (or set an initial password for Google Sign-In users).
+     */
+    public function updatePassword(Request $request): JsonResponse
+    {
+        $user = $request->user();
+        $isGoogleOnly = ($user->auth_provider === 'google');
+
+        $rules = [
+            'password' => ['required', 'string', Password::min(8)->letters()->numbers(), 'confirmed'],
+        ];
+        if (!$isGoogleOnly) {
+            $rules['current_password'] = ['required', 'string'];
+        }
+
+        $validated = $request->validate($rules);
+
+        if (!$isGoogleOnly && !Hash::check($validated['current_password'], $user->password)) {
+            return $this->error(
+                'Your current password is incorrect.',
+                'INVALID_CURRENT_PASSWORD',
+                null,
+                422
+            );
+        }
+
+        $updates = [
+            'password' => Hash::make($validated['password']),
+        ];
+        if ($isGoogleOnly) {
+            $updates['auth_provider'] = 'google+email';
+        }
+
+        $user->update($updates);
+
+        return $this->success([
+            'message' => $isGoogleOnly
+                ? 'Password set successfully. You can now sign in with either Google or email/password.'
+                : 'Password updated successfully.',
+            'user' => $user->fresh()->toProfileArray(),
         ]);
     }
 

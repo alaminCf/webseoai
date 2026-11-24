@@ -42,6 +42,11 @@ export function Sidebar({
 }: SidebarProps) {
   const { user, organizations, currentOrganization, switchOrganization, logout } = useAuth();
   const [orgDropdownOpen, setOrgDropdownOpen] = useState(false);
+  const [avatarError, setAvatarError] = useState(false);
+
+  React.useEffect(() => {
+    setAvatarError(false);
+  }, [user?.avatar_url]);
 
   // 9 intuitive, task-oriented sections as designed in Step 4
   const navItems = [
@@ -197,20 +202,42 @@ export function Sidebar({
         {/* Theme Switcher & User Footer */}
         <div className="p-4 border-t border-zinc-800/80 space-y-3">
           <ThemeToggle variant="segmented" />
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2.5 truncate">
-              <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-semibold text-zinc-200 shrink-0">
-                {user?.name?.charAt(0) || 'U'}
-              </div>
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('settings');
+                onClose();
+              }}
+              title="Edit your profile"
+              className="flex items-center gap-2.5 truncate flex-1 text-left p-1.5 -m-1.5 rounded-xl hover:bg-zinc-900/80 transition group"
+            >
+              {user?.avatar_url && !avatarError ? (
+                <img
+                  src={user.avatar_url}
+                  alt={user.name || 'User'}
+                  referrerPolicy="no-referrer"
+                  onError={() => setAvatarError(true)}
+                  className="w-8 h-8 rounded-full object-cover border border-emerald-500/40 shrink-0 bg-zinc-800"
+                />
+              ) : (
+                <div className="w-8 h-8 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center text-xs font-semibold text-zinc-200 shrink-0">
+                  {user?.name?.charAt(0)?.toUpperCase() || 'U'}
+                </div>
+              )}
               <div className="truncate">
-                <div className="text-xs font-semibold text-zinc-200 truncate">{user?.name}</div>
-                <div className="text-[11px] text-zinc-400 truncate">{user?.email}</div>
+                <div className="text-xs font-semibold text-zinc-200 group-hover:text-emerald-400 transition truncate">
+                  {user?.name}
+                </div>
+                <div className="text-[11px] text-zinc-400 truncate">
+                  {user?.job_title || user?.email}
+                </div>
               </div>
-            </div>
+            </button>
             <button
               onClick={logout}
               title="Sign out"
-              className="p-1.5 text-zinc-400 hover:text-red-400 hover:bg-zinc-900 rounded-lg transition"
+              className="p-1.5 text-zinc-400 hover:text-red-400 hover:bg-zinc-900 rounded-lg transition shrink-0"
             >
               <LogOut className="w-4 h-4" />
             </button>

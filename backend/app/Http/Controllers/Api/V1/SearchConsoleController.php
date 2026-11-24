@@ -58,8 +58,11 @@ class SearchConsoleController extends Controller
         $decodedWebsiteId = null;
         $oauthIntent = 'gsc';
         if ($state !== '') {
-            $decoded = json_decode(base64_decode($state), true);
+            $decoded = json_decode(base64_decode($state, true) ?: '', true);
             if (is_array($decoded)) {
+                if (($decoded['intent'] ?? '') === 'google_login') {
+                    return app(AuthController::class)->googleCallback($request, app(\App\Domain\Auth\GoogleAuthService::class));
+                }
                 if (isset($decoded['website_id'])) {
                     $decodedWebsiteId = (int) $decoded['website_id'];
                 }
