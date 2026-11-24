@@ -266,10 +266,13 @@ export function ReportsCenterView({ website }: ReportsCenterViewProps) {
     }
     setIsSavingBranding(true);
     try {
+      const normalizedColor = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(brandColor.trim())
+        ? brandColor.trim()
+        : '#10b981';
       const res = await api.put('/white-label/branding', {
         brand_name: brandName.trim(),
         logo_url: brandLogoUrl.trim() || null,
-        primary_color: brandColor,
+        primary_color: normalizedColor,
         contact_email: contactEmail.trim() || null,
         footer_text: footerText.trim() || 'Confidential SEO Performance & Technical Report',
       });
@@ -575,18 +578,53 @@ export function ReportsCenterView({ website }: ReportsCenterViewProps) {
               </div>
               <div>
                 <label className="block text-[11px] text-zinc-400 mb-1">Brand Accent Color</label>
-                <div className="flex items-center gap-1.5 pt-0.5">
+                <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
                   {BRAND_COLOR_PRESETS.map((c) => (
                     <button
                       key={c}
                       type="button"
                       onClick={() => setBrandColor(c)}
                       style={{ backgroundColor: c }}
+                      title={c}
                       className={`w-6 h-6 rounded-full border-2 transition ${
-                        brandColor === c ? 'border-white scale-110' : 'border-transparent opacity-75 hover:opacity-100'
+                        brandColor.toLowerCase() === c.toLowerCase()
+                          ? 'border-white scale-110'
+                          : 'border-transparent opacity-75 hover:opacity-100'
                       }`}
                     />
                   ))}
+                  {/* Custom Color Picker + HEX Input */}
+                  <div className="inline-flex items-center gap-1.5 pl-1.5 pr-2 py-0.5 rounded-lg bg-zinc-950 border border-zinc-700">
+                    <label
+                      title="Pick any custom brand color"
+                      className="relative w-5 h-5 rounded-full overflow-hidden border border-zinc-500 cursor-pointer shrink-0"
+                      style={{
+                        backgroundColor: /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(brandColor)
+                          ? brandColor
+                          : '#10b981',
+                      }}
+                    >
+                      <input
+                        type="color"
+                        value={/^#[0-9a-f]{6}$/i.test(brandColor) ? brandColor : '#10b981'}
+                        onChange={(e) => setBrandColor(e.target.value)}
+                        className="absolute inset-0 opacity-0 w-full h-full cursor-pointer"
+                        aria-label="Custom brand color picker"
+                      />
+                    </label>
+                    <input
+                      type="text"
+                      value={brandColor}
+                      onChange={(e) => {
+                        const raw = e.target.value.trim();
+                        setBrandColor(raw.startsWith('#') || raw === '' ? raw : `#${raw}`);
+                      }}
+                      maxLength={7}
+                      placeholder="#10b981"
+                      className="w-16 bg-transparent text-[11px] font-mono text-zinc-200 focus:outline-none uppercase"
+                      aria-label="Custom brand hex color"
+                    />
+                  </div>
                 </div>
               </div>
             </div>
