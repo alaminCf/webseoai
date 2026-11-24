@@ -52,18 +52,46 @@ class WhiteLabelReportService
             })->values()->toArray();
         }
 
-        // 2. Search Performance Metrics
-        $searchPerfQuery = SearchPerformanceRecord::where('website_id', $website->id);
-        $totalClicks = (int) $searchPerfQuery->sum('clicks');
-        $totalImpressions = (int) $searchPerfQuery->sum('impressions');
+        // 2. Search Performance Metrics (impression-weighted position + exact GSC snapshot when available)
+        $weightedPosSql = 'CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions * 1.0) / SUM(impressions) ELSE 0 END';
+        $searchTotals = SearchPerformanceRecord::where('website_id', $website->id)
+            ->selectRaw("COALESCE(SUM(clicks), 0) as clicks, COALESCE(SUM(impressions), 0) as impressions, {$weightedPosSql} as avg_pos")
+            ->first();
+
+        $totalClicks = (int) ($searchTotals->clicks ?? 0);
+        $totalImpressions = (int) ($searchTotals->impressions ?? 0);
         $avgCtr = $totalImpressions > 0 ? round(($totalClicks / $totalImpressions) * 100, 2) : 0;
-        $avgPosition = round((float) ($searchPerfQuery->avg('position') ?? 0), 1);
+        $avgPosition = $totalImpressions > 0 ? round((float) ($searchTotals->avg_pos ?? 0), 1) : 0.0;
+
+        $exactSnap = $website->gscIntegration?->metadata['exact_snapshots']['28d'] ?? null;
+        if (is_array($exactSnap) && isset($exactSnap['clicks'], $exactSnap['impressions'])) {
+            $totalClicks = (int) $exactSnap['clicks'];
+            $totalImpressions = (int) $exactSnap['impressions'];
+            $avgCtr = (float) ($exactSnap['ctr'] ?? $avgCtr);
+            $avgPosition = (float) ($exactSnap['position'] ?? $avgPosition);
+        }
 
         $topQueries = SearchPerformanceRecord::where('website_id', $website->id)
             ->whereNotNull('query')
+            ->where('query', '!=', '')
+            ->select('query')
+            ->selectRaw("SUM(clicks) as clicks, SUM(impressions) as impressions, {$weightedPosSql} as position")
+            ->groupBy('query')
             ->orderByDesc('clicks')
+            ->orderByDesc('impressions')
             ->take(10)
-            ->get(['query', 'clicks', 'impressions', 'ctr', 'position'])
+            ->get()
+            ->map(function ($row) {
+                $c = (int) $row->clicks;
+                $i = (int) $row->impressions;
+                return [
+                    'query' => (string) $row->query,
+                    'clicks' => $c,
+                    'impressions' => $i,
+                    'ctr' => $i > 0 ? round($c / $i, 4) : 0.0,
+                    'position' => round((float) $row->position, 1),
+                ];
+            })
             ->toArray();
 
         // 3. AI Recommendations

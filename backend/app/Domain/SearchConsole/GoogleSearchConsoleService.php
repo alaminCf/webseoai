@@ -8,6 +8,7 @@ use App\Models\Website;
 use App\Models\WebsiteIntegration;
 use Carbon\Carbon;
 use Exception;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -416,12 +417,418 @@ class GoogleSearchConsoleService
     {
         $metadata = $integration->metadata ?? [];
         $metadata['selected_property'] = $propertyId;
+        unset($metadata['exact_snapshots']);
 
         $integration->update([
             'metadata' => $metadata,
         ]);
 
+        $this->invalidateCache($integration->website_id);
+
         return $integration;
+    }
+
+    /**
+     * Bust cached live GSC performance queries for a website.
+     */
+    public function invalidateCache(int $websiteId): void
+    {
+        $verKey = "gsc_cache_ver:{$websiteId}";
+        $current = (int) Cache::get($verKey, 1);
+        Cache::put($verKey, $current + 1, now()->addDays(30));
+    }
+
+    /**
+     * Fetch live, exact Google Search Console performance analytics matching the official GSC UI.
+     *
+     * Uses un-truncated dimension queries (dimensions: [] for exact totals, ['date'] for daily trend,
+     * and separate ['query'], ['page'], ['device'], ['country'] queries) so anonymized long-tail queries
+     * are NEVER dropped from site totals or daily charts.
+     *
+     * Returns null when GSC is disconnected or running in sandbox mode.
+     */
+    public function fetchLivePerformanceReport(
+        Website $website,
+        string $range = '28d',
+        ?string $customStart = null,
+        ?string $customEnd = null,
+        array $filters = [],
+        bool $forceRefresh = false
+    ): ?array {
+        $integration = $website->gscIntegration;
+        if (!$integration || $integration->status !== WebsiteIntegration::STATUS_CONNECTED) {
+            return null;
+        }
+
+        $credentials = $integration->getDecryptedCredentials();
+        if (!$credentials || !empty($credentials['is_sandbox'])) {
+            return null;
+        }
+
+        $propertyId = $integration->metadata['selected_property'] ?? "sc-domain:{$website->domain}";
+        $cacheVer = (int) Cache::get("gsc_cache_ver:{$website->id}", 1);
+        $normalizedFilters = [
+            'country' => !empty($filters['country']) ? strtolower(trim((string) $filters['country'])) : null,
+            'device' => !empty($filters['device']) ? strtoupper(trim((string) $filters['device'])) : null,
+            'query' => !empty($filters['query']) ? trim((string) $filters['query']) : null,
+            'page' => !empty($filters['page']) ? trim((string) $filters['page']) : null,
+        ];
+        $hasFilters = !empty(array_filter($normalizedFilters, fn ($v) => $v !== null && $v !== ''));
+
+        $cacheKey = sprintf(
+            'gsc_live_perf:v%d:%d:%s:%s:%s:%s:%s',
+            $cacheVer,
+            $website->id,
+            md5($propertyId),
+            $range,
+            $customStart ?? '',
+            $customEnd ?? '',
+            md5(json_encode($normalizedFilters))
+        );
+
+        if (!$forceRefresh) {
+            $cached = Cache::get($cacheKey);
+            if (is_array($cached)) {
+                return $cached;
+            }
+        }
+
+        $accessToken = $this->getValidAccessToken($integration);
+        $encodedSiteUrl = rawurlencode($propertyId);
+        $endpoint = "https://www.googleapis.com/webmasters/v3/sites/{$encodedSiteUrl}/searchAnalytics/query";
+
+        // 1. Align end date to Google Search Console's exact latest finalized date (typically 2-3 days ago)
+        if ($range === 'custom' && $customEnd) {
+            $endDate = Carbon::parse($customEnd);
+        } elseif ($customEnd) {
+            $endDate = Carbon::parse($customEnd);
+        } else {
+            $endDate = Carbon::parse($this->resolveLatestAvailableDate($accessToken, $propertyId, $website->id, $cacheVer));
+        }
+
+        $startDate = match ($range) {
+            '7d' => (clone $endDate)->subDays(6),
+            '3m', '90d' => (clone $endDate)->subDays(89),
+            'custom' => $customStart ? Carbon::parse($customStart) : (clone $endDate)->subDays(27),
+            default => (clone $endDate)->subDays(27), // Exact 28 full days matching GSC UI
+        };
+
+        $days = max(1, $startDate->diffInDays($endDate) + 1);
+        $prevEndDate = (clone $startDate)->subDays(1);
+        $prevStartDate = (clone $prevEndDate)->subDays($days - 1);
+
+        $startStr = $startDate->toDateString();
+        $endStr = $endDate->toDateString();
+        $prevStartStr = $prevStartDate->toDateString();
+        $prevEndStr = $prevEndDate->toDateString();
+
+        // 2. Build GSC dimensionFilterGroups for any active filters
+        $dimensionFilterGroups = $this->buildDimensionFilterGroups($normalizedFilters);
+
+        $makePayload = function (string $from, string $to, array $dimensions = [], int $rowLimit = 100) use ($dimensionFilterGroups): array {
+            $payload = [
+                'startDate' => $from,
+                'endDate' => $to,
+                'type' => 'web',
+                'rowLimit' => $rowLimit,
+            ];
+            if (!empty($dimensions)) {
+                $payload['dimensions'] = $dimensions;
+            }
+            if (!empty($dimensionFilterGroups)) {
+                $payload['dimensionFilterGroups'] = $dimensionFilterGroups;
+            }
+            return $payload;
+        };
+
+        // 3. Execute all 7 dimension queries in parallel (eliminates anonymized query truncation!)
+        $responses = Http::pool(fn (\Illuminate\Http\Client\Pool $pool) => [
+            'curr_summary' => $pool->as('curr_summary')->withToken($accessToken)->timeout(20)->post($endpoint, $makePayload($startStr, $endStr, [], 1)),
+            'prev_summary' => $pool->as('prev_summary')->withToken($accessToken)->timeout(20)->post($endpoint, $makePayload($prevStartStr, $prevEndStr, [], 1)),
+            'daily'        => $pool->as('daily')->withToken($accessToken)->timeout(20)->post($endpoint, $makePayload($startStr, $endStr, ['date'], 500)),
+            'queries'      => $pool->as('queries')->withToken($accessToken)->timeout(20)->post($endpoint, $makePayload($startStr, $endStr, ['query'], 100)),
+            'pages'        => $pool->as('pages')->withToken($accessToken)->timeout(20)->post($endpoint, $makePayload($startStr, $endStr, ['page'], 100)),
+            'devices'      => $pool->as('devices')->withToken($accessToken)->timeout(20)->post($endpoint, $makePayload($startStr, $endStr, ['device'], 10)),
+            'countries'    => $pool->as('countries')->withToken($accessToken)->timeout(20)->post($endpoint, $makePayload($startStr, $endStr, ['country'], 50)),
+        ]);
+
+        // Verify at least summary or daily succeeded; throw if auth/API failed so caller can handle/fallback
+        $currResp = $responses['curr_summary'] ?? null;
+        $dailyResp = $responses['daily'] ?? null;
+        if (
+            (!$currResp || $currResp instanceof Throwable || !$currResp->successful()) &&
+            (!$dailyResp || $dailyResp instanceof Throwable || !$dailyResp->successful())
+        ) {
+            $errMsg = ($currResp && !($currResp instanceof Throwable))
+                ? ($currResp->json('error.message') ?? $currResp->body())
+                : ($currResp instanceof Throwable ? $currResp->getMessage() : 'GSC live query failed');
+            throw new Exception('Google Search Console live query failed: ' . $errMsg);
+        }
+
+        $extractRows = function ($resp): array {
+            if (!$resp || $resp instanceof Throwable || !$resp->successful()) {
+                return [];
+            }
+            return $resp->json('rows') ?? [];
+        };
+
+        // 4. Daily timeseries (gap-filled across the exact window so chart is continuous)
+        $dailyByDate = [];
+        foreach ($extractRows($dailyResp) as $row) {
+            $d = (string) ($row['keys'][0] ?? '');
+            if ($d === '') {
+                continue;
+            }
+            $clicks = (int) round((float) ($row['clicks'] ?? 0));
+            $impressions = (int) round((float) ($row['impressions'] ?? 0));
+            $ctr = $impressions > 0 ? round(($clicks / $impressions) * 100, 2) : 0.0;
+            $pos = round((float) ($row['position'] ?? 0), 1);
+
+            $dailyByDate[$d] = [
+                'date' => $d,
+                'clicks' => $clicks,
+                'impressions' => $impressions,
+                'ctr' => $ctr,
+                'position' => $pos,
+            ];
+        }
+
+        $timeseries = [];
+        $cursor = (clone $startDate);
+        while ($cursor->lte($endDate)) {
+            $dStr = $cursor->toDateString();
+            $timeseries[] = $dailyByDate[$dStr] ?? [
+                'date' => $dStr,
+                'clicks' => 0,
+                'impressions' => 0,
+                'ctr' => 0.0,
+                'position' => 0.0,
+            ];
+            $cursor->addDay();
+        }
+
+        // 5. Exact current & prior summary (from dimensions: [] — matches GSC UI KPI cards 1-to-1)
+        $currRow = $extractRows($currResp)[0] ?? null;
+        if ($currRow) {
+            $currClicks = (int) round((float) ($currRow['clicks'] ?? 0));
+            $currImp = (int) round((float) ($currRow['impressions'] ?? 0));
+            $currCtr = $currImp > 0 ? round(($currClicks / $currImp) * 100, 2) : 0.0;
+            $currPos = $currImp > 0 ? round((float) ($currRow['position'] ?? 0), 1) : 0.0;
+        } else {
+            // Fallback to summing exact daily rows with impression-weighted position
+            $currClicks = array_sum(array_column($timeseries, 'clicks'));
+            $currImp = array_sum(array_column($timeseries, 'impressions'));
+            $currCtr = $currImp > 0 ? round(($currClicks / $currImp) * 100, 2) : 0.0;
+            $weightedPos = 0.0;
+            foreach ($timeseries as $pt) {
+                $weightedPos += $pt['position'] * $pt['impressions'];
+            }
+            $currPos = $currImp > 0 ? round($weightedPos / $currImp, 1) : 0.0;
+        }
+
+        $prevRow = $extractRows($responses['prev_summary'] ?? null)[0] ?? null;
+        $prevClicks = $prevRow ? (int) round((float) ($prevRow['clicks'] ?? 0)) : 0;
+        $prevImp = $prevRow ? (int) round((float) ($prevRow['impressions'] ?? 0)) : 0;
+        $prevCtr = $prevImp > 0 ? round(($prevClicks / $prevImp) * 100, 2) : 0.0;
+        $prevPos = ($prevRow && $prevImp > 0) ? round((float) ($prevRow['position'] ?? 0), 1) : 0.0;
+
+        // 6. Top Queries, Pages, Devices, Countries (exact dimension-level rows from GSC)
+        $queries = array_map(function ($row) {
+            $clicks = (int) round((float) ($row['clicks'] ?? 0));
+            $imp = (int) round((float) ($row['impressions'] ?? 0));
+            return [
+                'query' => (string) ($row['keys'][0] ?? ''),
+                'clicks' => $clicks,
+                'impressions' => $imp,
+                'ctr' => $imp > 0 ? round(($clicks / $imp) * 100, 2) : 0.0,
+                'position' => round((float) ($row['position'] ?? 0), 1),
+            ];
+        }, $extractRows($responses['queries'] ?? null));
+
+        $pages = array_map(function ($row) {
+            $clicks = (int) round((float) ($row['clicks'] ?? 0));
+            $imp = (int) round((float) ($row['impressions'] ?? 0));
+            return [
+                'page' => (string) ($row['keys'][0] ?? ''),
+                'clicks' => $clicks,
+                'impressions' => $imp,
+                'ctr' => $imp > 0 ? round(($clicks / $imp) * 100, 2) : 0.0,
+                'position' => round((float) ($row['position'] ?? 0), 1),
+            ];
+        }, $extractRows($responses['pages'] ?? null));
+
+        $devices = array_map(function ($row) {
+            $clicks = (int) round((float) ($row['clicks'] ?? 0));
+            $imp = (int) round((float) ($row['impressions'] ?? 0));
+            return [
+                'device' => strtoupper((string) ($row['keys'][0] ?? 'DESKTOP')),
+                'clicks' => $clicks,
+                'impressions' => $imp,
+                'ctr' => $imp > 0 ? round(($clicks / $imp) * 100, 2) : 0.0,
+                'position' => round((float) ($row['position'] ?? 0), 1),
+            ];
+        }, $extractRows($responses['devices'] ?? null));
+
+        $countries = array_map(function ($row) {
+            $clicks = (int) round((float) ($row['clicks'] ?? 0));
+            $imp = (int) round((float) ($row['impressions'] ?? 0));
+            return [
+                'country' => strtoupper((string) ($row['keys'][0] ?? 'USA')),
+                'clicks' => $clicks,
+                'impressions' => $imp,
+                'ctr' => $imp > 0 ? round(($clicks / $imp) * 100, 2) : 0.0,
+                'position' => round((float) ($row['position'] ?? 0), 1),
+            ];
+        }, $extractRows($responses['countries'] ?? null));
+
+        $queryAttributedClicks = array_sum(array_column($queries, 'clicks'));
+        $anonymizedClicks = max(0, $currClicks - $queryAttributedClicks);
+
+        $result = [
+            'data_source' => 'google_search_console_live',
+            'property_id' => $propertyId,
+            'period' => [
+                'start_date' => $startStr,
+                'end_date' => $endStr,
+                'previous_start_date' => $prevStartStr,
+                'previous_end_date' => $prevEndStr,
+            ],
+            'summary' => [
+                'clicks' => $currClicks,
+                'impressions' => $currImp,
+                'ctr' => $currCtr,
+                'position' => $currPos,
+                'anonymized_query_clicks' => $anonymizedClicks,
+                'comparison' => [
+                    'previous_clicks' => $prevClicks,
+                    'previous_impressions' => $prevImp,
+                    'previous_ctr' => $prevCtr,
+                    'previous_position' => $prevPos,
+                    'diff_clicks' => $currClicks - $prevClicks,
+                    'diff_impressions' => $currImp - $prevImp,
+                    'diff_ctr' => round($currCtr - $prevCtr, 2),
+                    'diff_position' => round($currPos - $prevPos, 1),
+                ],
+            ],
+            'timeseries' => $timeseries,
+            'queries' => $queries,
+            'pages' => $pages,
+            'devices' => $devices,
+            'countries' => $countries,
+        ];
+
+        // Persist exact unfiltered snapshot on integration metadata for Reports & Overview fallbacks
+        if (!$hasFilters && in_array($range, ['7d', '28d', '3m', '90d'], true)) {
+            $snapKey = $range === '3m' ? '90d' : $range;
+            $metadata = $integration->metadata ?? [];
+            $metadata['exact_snapshots'][$snapKey] = [
+                'property_id' => $propertyId,
+                'start_date' => $startStr,
+                'end_date' => $endStr,
+                'clicks' => $currClicks,
+                'impressions' => $currImp,
+                'ctr' => $currCtr,
+                'position' => $currPos,
+                'captured_at' => now()->toIso8601String(),
+            ];
+            $integration->update(['metadata' => $metadata]);
+        }
+
+        Cache::put($cacheKey, $result, now()->addMinutes(10));
+
+        return $result;
+    }
+
+    /**
+     * Detect Google Search Console's exact latest finalized date (typically 2-3 days behind today).
+     */
+    private function resolveLatestAvailableDate(string $accessToken, string $propertyId, int $websiteId, int $cacheVer): string
+    {
+        $anchorKey = sprintf('gsc_latest_date:v%d:%d:%s', $cacheVer, $websiteId, md5($propertyId));
+        $cached = Cache::get($anchorKey);
+        if (is_string($cached) && $cached !== '') {
+            return $cached;
+        }
+
+        $encodedSiteUrl = rawurlencode($propertyId);
+        $endpoint = "https://www.googleapis.com/webmasters/v3/sites/{$encodedSiteUrl}/searchAnalytics/query";
+
+        try {
+            $resp = Http::withToken($accessToken)
+                ->timeout(12)
+                ->post($endpoint, [
+                    'startDate' => now()->subDays(14)->toDateString(),
+                    'endDate' => now()->toDateString(),
+                    'dimensions' => ['date'],
+                    'type' => 'web',
+                    'rowLimit' => 20,
+                ]);
+
+            if ($resp->successful()) {
+                $rows = $resp->json('rows') ?? [];
+                $dates = array_filter(array_map(fn ($r) => (string) ($r['keys'][0] ?? ''), $rows));
+                if (!empty($dates)) {
+                    rsort($dates);
+                    $latest = $dates[0];
+                    Cache::put($anchorKey, $latest, now()->addMinutes(15));
+                    return $latest;
+                }
+            }
+        } catch (Throwable $e) {
+            Log::warning('Could not detect latest GSC finalized date, falling back to 2 days ago', [
+                'website_id' => $websiteId,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        return now()->subDays(2)->toDateString();
+    }
+
+    /**
+     * Build official GSC API dimensionFilterGroups from user filters.
+     */
+    private function buildDimensionFilterGroups(array $filters): array
+    {
+        $items = [];
+        if (!empty($filters['country'])) {
+            $items[] = [
+                'dimension' => 'country',
+                'operator' => 'equals',
+                'expression' => strtolower((string) $filters['country']),
+            ];
+        }
+        if (!empty($filters['device'])) {
+            $items[] = [
+                'dimension' => 'device',
+                'operator' => 'equals',
+                'expression' => strtoupper((string) $filters['device']),
+            ];
+        }
+        if (!empty($filters['query'])) {
+            $items[] = [
+                'dimension' => 'query',
+                'operator' => 'contains',
+                'expression' => (string) $filters['query'],
+            ];
+        }
+        if (!empty($filters['page'])) {
+            $items[] = [
+                'dimension' => 'page',
+                'operator' => 'contains',
+                'expression' => (string) $filters['page'],
+            ];
+        }
+
+        if (empty($items)) {
+            return [];
+        }
+
+        return [
+            [
+                'groupType' => 'and',
+                'filters' => $items,
+            ],
+        ];
     }
 
     /**
@@ -436,9 +843,26 @@ class GoogleSearchConsoleService
 
         $propertyId = $integration->metadata['selected_property'] ?? "sc-domain:{$website->domain}";
 
-        // Default to last 28 days
-        $start = $startDate ? Carbon::parse($startDate)->toDateString() : now()->subDays(28)->toDateString();
-        $end = $endDate ? Carbon::parse($endDate)->toDateString() : now()->subDays(1)->toDateString();
+        $credentials = $integration->getDecryptedCredentials();
+        $isSandbox = !empty($credentials['is_sandbox']);
+
+        // Bust live cache immediately so fresh data is pulled on next read
+        $this->invalidateCache($website->id);
+
+        if ($isSandbox) {
+            $end = $endDate ? Carbon::parse($endDate)->toDateString() : now()->subDays(1)->toDateString();
+            $start = $startDate ? Carbon::parse($startDate)->toDateString() : Carbon::parse($end)->subDays(27)->toDateString();
+        } else {
+            $accessToken = $this->getValidAccessToken($integration);
+            $cacheVer = (int) Cache::get("gsc_cache_ver:{$website->id}", 1);
+            $end = $endDate
+                ? Carbon::parse($endDate)->toDateString()
+                : $this->resolveLatestAvailableDate($accessToken, $propertyId, $website->id, $cacheVer);
+            // Sync last 60 days by default so 28d + prior 28d opportunity comparisons have full history
+            $start = $startDate
+                ? Carbon::parse($startDate)->toDateString()
+                : Carbon::parse($end)->subDays(59)->toDateString();
+        }
 
         $syncLog = SearchConsoleSyncLog::create([
             'organization_id' => $website->organization_id,
@@ -453,15 +877,18 @@ class GoogleSearchConsoleService
         ]);
 
         try {
-            $credentials = $integration->getDecryptedCredentials();
             $rows = [];
+            $exactSiteTotals = null;
 
-            if (!empty($credentials['is_sandbox'])) {
+            if ($isSandbox) {
                 // Generate realistic deterministic analytics data for sandbox/dev
                 $rows = $this->generateSandboxAnalyticsRows($website, $propertyId, $start, $end);
             } else {
-                $accessToken = $this->getValidAccessToken($integration);
                 $rows = $this->querySearchAnalyticsFromGoogle($accessToken, $propertyId, $start, $end);
+
+                // Fetch exact un-truncated 28-day site totals (dimensions: []) to store in metadata & sync log
+                $snap28Start = Carbon::parse($end)->subDays(27)->toDateString();
+                $exactSiteTotals = $this->queryExactTotalsFromGoogle($accessToken, $propertyId, $snap28Start, $end);
             }
 
             // Persist rows into search_performance_records
@@ -473,14 +900,12 @@ class GoogleSearchConsoleService
             $insertPayload = [];
             $totalClicks = 0;
             $totalImpressions = 0;
-            $ctrSum = 0;
-            $posSum = 0;
+            $weightedPosSum = 0.0;
 
             foreach ($rows as $row) {
                 $totalClicks += $row['clicks'];
                 $totalImpressions += $row['impressions'];
-                $ctrSum += $row['ctr'];
-                $posSum += $row['position'];
+                $weightedPosSum += $row['position'] * $row['impressions'];
 
                 $insertPayload[] = [
                     'organization_id' => $website->organization_id,
@@ -506,16 +931,16 @@ class GoogleSearchConsoleService
             }
 
             $rowCount = count($insertPayload);
-            $avgCtr = $rowCount > 0 ? round($ctrSum / $rowCount, 4) : 0.0;
-            $avgPos = $rowCount > 0 ? round($posSum / $rowCount, 2) : 0.0;
+            $avgCtr = $totalImpressions > 0 ? round($totalClicks / $totalImpressions, 4) : 0.0;
+            $avgPos = $totalImpressions > 0 ? round($weightedPosSum / $totalImpressions, 2) : 0.0;
 
             $summary = [
-                'total_clicks' => $totalClicks,
-                'total_impressions' => $totalImpressions,
-                'avg_ctr' => $avgCtr,
-                'avg_position' => $avgPos,
-                'unique_queries' => count(array_unique(array_column($rows, 'query'))),
-                'unique_pages' => count(array_unique(array_column($rows, 'page'))),
+                'total_clicks' => $exactSiteTotals['clicks'] ?? $totalClicks,
+                'total_impressions' => $exactSiteTotals['impressions'] ?? $totalImpressions,
+                'avg_ctr' => $exactSiteTotals ? round($exactSiteTotals['ctr'] / 100, 4) : $avgCtr,
+                'avg_position' => $exactSiteTotals['position'] ?? $avgPos,
+                'unique_queries' => count(array_unique(array_filter(array_column($rows, 'query')))),
+                'unique_pages' => count(array_unique(array_filter(array_column($rows, 'page')))),
             ];
 
             $syncLog->update([
@@ -525,9 +950,24 @@ class GoogleSearchConsoleService
                 'completed_at' => now(),
             ]);
 
+            $metadata = $integration->metadata ?? [];
+            if ($exactSiteTotals) {
+                $metadata['exact_snapshots']['28d'] = [
+                    'property_id' => $propertyId,
+                    'start_date' => Carbon::parse($end)->subDays(27)->toDateString(),
+                    'end_date' => $end,
+                    'clicks' => $exactSiteTotals['clicks'],
+                    'impressions' => $exactSiteTotals['impressions'],
+                    'ctr' => $exactSiteTotals['ctr'],
+                    'position' => $exactSiteTotals['position'],
+                    'captured_at' => now()->toIso8601String(),
+                ];
+            }
+
             $integration->update([
                 'last_synced_at' => now(),
                 'last_error' => null,
+                'metadata' => $metadata,
             ]);
 
             return $syncLog;
@@ -616,7 +1056,47 @@ class GoogleSearchConsoleService
     }
 
     /**
-     * Query Search Analytics from Google Search Console REST API.
+     * Fetch exact un-truncated site totals (dimensions: []) for a date window.
+     */
+    private function queryExactTotalsFromGoogle(string $accessToken, string $propertyId, string $startDate, string $endDate): ?array
+    {
+        $encodedSiteUrl = rawurlencode($propertyId);
+        $endpoint = "https://www.googleapis.com/webmasters/v3/sites/{$encodedSiteUrl}/searchAnalytics/query";
+
+        try {
+            $resp = Http::withToken($accessToken)
+                ->timeout(15)
+                ->post($endpoint, [
+                    'startDate' => $startDate,
+                    'endDate' => $endDate,
+                    'type' => 'web',
+                ]);
+
+            if ($resp->successful()) {
+                $row = ($resp->json('rows') ?? [])[0] ?? null;
+                if ($row) {
+                    $clicks = (int) round((float) ($row['clicks'] ?? 0));
+                    $impressions = (int) round((float) ($row['impressions'] ?? 0));
+                    return [
+                        'clicks' => $clicks,
+                        'impressions' => $impressions,
+                        'ctr' => $impressions > 0 ? round(($clicks / $impressions) * 100, 2) : 0.0,
+                        'position' => $impressions > 0 ? round((float) ($row['position'] ?? 0), 1) : 0.0,
+                    ];
+                }
+            }
+        } catch (Throwable $e) {
+            Log::warning('Failed fetching exact GSC totals during sync', ['error' => $e->getMessage()]);
+        }
+
+        return null;
+    }
+
+    /**
+     * Query Search Analytics from Google Search Console REST API for DB persistence.
+     * Uses ['date', 'page', 'query'] (3 dimensions instead of 5) to drastically reduce
+     * Google's anonymized-query privacy pruning while preserving full page/query/date granularity
+     * for Opportunity Detection, Rank Checker, and Keyword Gap analysis.
      */
     private function querySearchAnalyticsFromGoogle(string $accessToken, string $propertyId, string $startDate, string $endDate): array
     {
@@ -634,7 +1114,8 @@ class GoogleSearchConsoleService
                 ->post($endpoint, [
                     'startDate' => $startDate,
                     'endDate' => $endDate,
-                    'dimensions' => ['date', 'page', 'query', 'country', 'device'],
+                    'dimensions' => ['date', 'page', 'query'],
+                    'type' => 'web',
                     'rowLimit' => $rowLimit,
                     'startRow' => $startRow,
                 ]);
@@ -654,8 +1135,8 @@ class GoogleSearchConsoleService
                     'date' => $keys[0] ?? $startDate,
                     'page' => $keys[1] ?? '',
                     'query' => $keys[2] ?? '',
-                    'country' => strtoupper($keys[3] ?? 'USA'),
-                    'device' => strtoupper($keys[4] ?? 'DESKTOP'),
+                    'country' => null,
+                    'device' => null,
                     'clicks' => (int) ($item['clicks'] ?? 0),
                     'impressions' => (int) ($item['impressions'] ?? 0),
                     'ctr' => round((float) ($item['ctr'] ?? 0), 4),

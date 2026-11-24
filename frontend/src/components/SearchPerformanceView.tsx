@@ -39,6 +39,334 @@ interface SearchPerformanceViewProps {
   onCheckLiveRank?: (keyword: string) => void;
 }
 
+const ISO3_COUNTRY_NAMES: Record<string, string> = {
+  SGP: 'Singapore',
+  USA: 'United States',
+  GBR: 'United Kingdom',
+  CAN: 'Canada',
+  AUS: 'Australia',
+  IND: 'India',
+  MYS: 'Malaysia',
+  IDN: 'Indonesia',
+  PHL: 'Philippines',
+  BGD: 'Bangladesh',
+  ARE: 'United Arab Emirates',
+  DEU: 'Germany',
+  FRA: 'France',
+  JPN: 'Japan',
+  KOR: 'South Korea',
+  NLD: 'Netherlands',
+  NZL: 'New Zealand',
+  HKG: 'Hong Kong',
+  THA: 'Thailand',
+  VNM: 'Vietnam',
+  PAK: 'Pakistan',
+  SAU: 'Saudi Arabia',
+};
+
+function formatIso3Country(code: string): string {
+  const upper = code.toUpperCase();
+  const name = ISO3_COUNTRY_NAMES[upper];
+  return name ? `${name} (${upper})` : upper;
+}
+
+function formatShortDate(dateStr: string): string {
+  const parts = dateStr.split('-');
+  if (parts.length !== 3) return dateStr;
+  const d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+  if (Number.isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+interface DualAxisTrendChartProps {
+  timeseries: SearchPerformanceData['timeseries'];
+  period?: SearchPerformanceData['period'];
+  dataSource?: SearchPerformanceData['data_source'];
+}
+
+function DualAxisTrendChart({ timeseries, period, dataSource }: DualAxisTrendChartProps) {
+  const [showClicks, setShowClicks] = useState(true);
+  const [showImpressions, setShowImpressions] = useState(true);
+  const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
+
+  const width = 920;
+  const height = 220;
+  const padLeft = 44;
+  const padRight = 54;
+  const padTop = 18;
+  const padBottom = 32;
+  const plotW = width - padLeft - padRight;
+  const plotH = height - padTop - padBottom;
+
+  const rawMaxClicks = Math.max(...timeseries.map((p) => p.clicks), 0);
+  const maxClicks = rawMaxClicks <= 3 ? Math.max(3, rawMaxClicks) : Math.ceil(rawMaxClicks * 1.15);
+  const rawMaxImp = Math.max(...timeseries.map((p) => p.impressions), 0);
+  const maxImp = rawMaxImp === 0 ? 10 : Math.ceil((rawMaxImp * 1.15) / 10) * 10;
+
+  const xFor = (i: number) =>
+    timeseries.length <= 1
+      ? padLeft + plotW / 2
+      : padLeft + (i / (timeseries.length - 1)) * plotW;
+  const yClicks = (v: number) => padTop + plotH - (Math.min(v, maxClicks) / maxClicks) * plotH;
+  const yImp = (v: number) => padTop + plotH - (Math.min(v, maxImp) / maxImp) * plotH;
+
+  const clicksLine = timeseries.map((p, i) => `${xFor(i).toFixed(1)},${yClicks(p.clicks).toFixed(1)}`).join(' ');
+  const clicksArea =
+    timeseries.length > 0
+      ? `M ${xFor(0).toFixed(1)},${(padTop + plotH).toFixed(1)} ` +
+        timeseries.map((p, i) => `L ${xFor(i).toFixed(1)},${yClicks(p.clicks).toFixed(1)}`).join(' ') +
+        ` L ${xFor(timeseries.length - 1).toFixed(1)},${(padTop + plotH).toFixed(1)} Z`
+      : '';
+
+  const impLine = timeseries.map((p, i) => `${xFor(i).toFixed(1)},${yImp(p.impressions).toFixed(1)}`).join(' ');
+
+  const yTicks = [0, 0.333, 0.666, 1];
+  const xLabelStep = timeseries.length <= 10 ? 1 : timeseries.length <= 35 ? 3 : Math.ceil(timeseries.length / 10);
+  const hovered = hoveredIdx !== null ? timeseries[hoveredIdx] : null;
+
+  return (
+    <div className="p-5 bg-zinc-950 border border-zinc-800/80 rounded-2xl shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <span className="text-xs font-bold uppercase tracking-wider text-zinc-200">
+            Daily Clicks &amp; Impressions Trend
+          </span>
+          {period && (
+            <span className="text-[11px] font-mono text-zinc-400 bg-zinc-900 border border-zinc-800 px-2 py-0.5 rounded-md">
+              {formatShortDate(period.start_date)} – {formatShortDate(period.end_date)}
+            </span>
+          )}
+          {dataSource === 'google_search_console_live' && (
+            <span className="text-[10px] font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">
+              Exact Live GSC API
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2 text-xs">
+          <button
+            type="button"
+            onClick={() => setShowClicks((s) => !s)}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition ${
+              showClicks
+                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                : 'bg-zinc-900 border-zinc-800 text-zinc-500 line-through'
+            }`}
+          >
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
+            Clicks
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowImpressions((s) => !s)}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition ${
+              showImpressions
+                ? 'bg-violet-500/10 border-violet-500/30 text-violet-300'
+                : 'bg-zinc-900 border-zinc-800 text-zinc-500 line-through'
+            }`}
+          >
+            <span className="w-2.5 h-2.5 rounded-full bg-violet-400" />
+            Impressions
+          </button>
+        </div>
+      </div>
+
+      {/* Hover readout bar */}
+      <div className="min-h-[24px] mb-1 flex flex-wrap items-center justify-between text-[11px] text-zinc-400">
+        {hovered ? (
+          <div className="flex flex-wrap items-center gap-4">
+            <span className="font-semibold text-zinc-200 font-mono">{hovered.date}</span>
+            <span className="text-emerald-400 font-mono font-semibold">
+              Clicks: {hovered.clicks.toLocaleString()}
+            </span>
+            <span className="text-violet-300 font-mono font-semibold">
+              Impressions: {hovered.impressions.toLocaleString()}
+            </span>
+            <span className="text-cyan-400 font-mono">CTR: {hovered.ctr}%</span>
+            <span className="text-zinc-300 font-mono">
+              Avg Pos: {hovered.position > 0 ? `#${hovered.position}` : '—'}
+            </span>
+          </div>
+        ) : (
+          <span>Hover over any date to inspect exact daily clicks, impressions, CTR, and average position.</span>
+        )}
+      </div>
+
+      {/* Responsive Dual-Axis SVG Chart */}
+      <div className="w-full overflow-x-auto">
+        <svg
+          viewBox={`0 0 ${width} ${height}`}
+          className="w-full h-56 min-w-[540px] select-none"
+          onMouseLeave={() => setHoveredIdx(null)}
+        >
+          <defs>
+            <linearGradient id="gscClicksGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#10b981" stopOpacity="0.28" />
+              <stop offset="100%" stopColor="#10b981" stopOpacity="0.01" />
+            </linearGradient>
+          </defs>
+
+          {/* Horizontal Gridlines & Left/Right Axis Labels */}
+          {yTicks.map((ratio, idx) => {
+            const y = padTop + plotH - ratio * plotH;
+            const leftVal = Math.round(maxClicks * ratio);
+            const rightVal = Math.round(maxImp * ratio);
+            return (
+              <g key={idx}>
+                <line
+                  x1={padLeft}
+                  y1={y}
+                  x2={width - padRight}
+                  y2={y}
+                  stroke="#27272a"
+                  strokeWidth="1"
+                  strokeDasharray={idx === 0 ? undefined : '3 3'}
+                />
+                {showClicks && (
+                  <text
+                    x={padLeft - 8}
+                    y={y + 3.5}
+                    textAnchor="end"
+                    fontSize="10"
+                    fill="#34d399"
+                    fontFamily="ui-monospace, monospace"
+                  >
+                    {leftVal.toLocaleString()}
+                  </text>
+                )}
+                {showImpressions && (
+                  <text
+                    x={width - padRight + 8}
+                    y={y + 3.5}
+                    textAnchor="start"
+                    fontSize="10"
+                    fill="#a78bfa"
+                    fontFamily="ui-monospace, monospace"
+                  >
+                    {rightVal >= 1000 ? `${(rightVal / 1000).toFixed(1)}K` : rightVal.toLocaleString()}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+
+          {/* Axis Titles */}
+          {showClicks && (
+            <text x={padLeft} y={11} fontSize="9" fill="#34d399" fontWeight="600">
+              Clicks
+            </text>
+          )}
+          {showImpressions && (
+            <text x={width - padRight} y={11} textAnchor="end" fontSize="9" fill="#a78bfa" fontWeight="600">
+              Impressions
+            </text>
+          )}
+
+          {/* Clicks Area Fill */}
+          {showClicks && clicksArea && <path d={clicksArea} fill="url(#gscClicksGrad)" />}
+
+          {/* Impressions Polyline */}
+          {showImpressions && timeseries.length > 1 && (
+            <polyline
+              fill="none"
+              stroke="#a78bfa"
+              strokeWidth="2.2"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              points={impLine}
+            />
+          )}
+
+          {/* Clicks Polyline */}
+          {showClicks && timeseries.length > 1 && (
+            <polyline
+              fill="none"
+              stroke="#10b981"
+              strokeWidth="2.4"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              points={clicksLine}
+            />
+          )}
+
+          {/* Hover Vertical Crosshair & Active Dots */}
+          {hoveredIdx !== null && hovered && (
+            <g>
+              <line
+                x1={xFor(hoveredIdx)}
+                y1={padTop}
+                x2={xFor(hoveredIdx)}
+                y2={padTop + plotH}
+                stroke="#52525b"
+                strokeWidth="1"
+                strokeDasharray="3 3"
+              />
+              {showImpressions && (
+                <circle
+                  cx={xFor(hoveredIdx)}
+                  cy={yImp(hovered.impressions)}
+                  r="4.5"
+                  fill="#a78bfa"
+                  stroke="#09090b"
+                  strokeWidth="2"
+                />
+              )}
+              {showClicks && (
+                <circle
+                  cx={xFor(hoveredIdx)}
+                  cy={yClicks(hovered.clicks)}
+                  r="4.5"
+                  fill="#10b981"
+                  stroke="#09090b"
+                  strokeWidth="2"
+                />
+              )}
+            </g>
+          )}
+
+          {/* X-Axis Labels */}
+          {timeseries.map((pt, i) => {
+            const isFirstOrLast = i === 0 || i === timeseries.length - 1;
+            if (!isFirstOrLast && i % xLabelStep !== 0) return null;
+            return (
+              <text
+                key={`lbl-${pt.date}`}
+                x={xFor(i)}
+                y={height - 8}
+                textAnchor={i === 0 ? 'start' : i === timeseries.length - 1 ? 'end' : 'middle'}
+                fontSize="10"
+                fill="#a1a1aa"
+                fontFamily="ui-monospace, monospace"
+              >
+                {formatShortDate(pt.date)}
+              </text>
+            );
+          })}
+
+          {/* Invisible Interactive Hit Columns */}
+          {timeseries.map((pt, i) => {
+            const stepW = timeseries.length > 1 ? plotW / (timeseries.length - 1) : plotW;
+            const rectX = Math.max(padLeft, xFor(i) - stepW / 2);
+            const rectW = Math.min(width - padRight - rectX, stepW);
+            return (
+              <rect
+                key={`hit-${pt.date}`}
+                x={rectX}
+                y={padTop}
+                width={Math.max(4, rectW)}
+                height={plotH}
+                fill="transparent"
+                className="cursor-crosshair"
+                onMouseEnter={() => setHoveredIdx(i)}
+              />
+            );
+          })}
+        </svg>
+      </div>
+    </div>
+  );
+}
+
 export function SearchPerformanceView({
   website,
   onNavigateToOpportunities,
@@ -562,73 +890,36 @@ export function SearchPerformanceView({
                 <option value="ALL">All Devices</option>
                 <option value="DESKTOP">Desktop</option>
                 <option value="MOBILE">Mobile</option>
+                <option value="TABLET">Tablet</option>
               </select>
 
-              {/* Country Selector */}
+              {/* Dynamic Country Selector populated from GSC countries */}
               <select
                 value={countryFilter}
                 onChange={(e) => setCountryFilter(e.target.value)}
                 className="bg-zinc-900 border border-zinc-800 rounded-xl px-2.5 py-1.5 text-xs text-zinc-300 focus:outline-none"
               >
                 <option value="ALL">All Countries</option>
-                <option value="USA">United States</option>
-                <option value="GBR">United Kingdom</option>
-                <option value="CAN">Canada</option>
-                <option value="AUS">Australia</option>
+                {(() => {
+                  const dynamicCodes = (performance?.countries || []).map((c) => c.country.toUpperCase());
+                  const merged = Array.from(new Set([...dynamicCodes, 'SGP', 'USA', 'GBR', 'CAN', 'AUS']));
+                  return merged.map((code) => (
+                    <option key={code} value={code}>
+                      {formatIso3Country(code)}
+                    </option>
+                  ));
+                })()}
               </select>
             </div>
           </div>
 
-          {/* Interactive Timeseries Visual Trend */}
+          {/* Interactive Dual-Axis Timeseries Visual Trend */}
           {performance?.timeseries && performance.timeseries.length > 0 && (
-            <div className="p-5 bg-zinc-950 border border-zinc-800/80 rounded-2xl shadow-sm">
-              <div className="flex items-center justify-between mb-4">
-                <span className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-                  Daily Clicks & Impressions Trend
-                </span>
-                <div className="flex items-center gap-4 text-xs">
-                  <span className="flex items-center gap-1.5 text-emerald-400">
-                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
-                    Clicks
-                  </span>
-                  <span className="flex items-center gap-1.5 text-cyan-400">
-                    <span className="w-2.5 h-2.5 rounded-full bg-cyan-500" />
-                    Impressions
-                  </span>
-                </div>
-              </div>
-
-              {/* Bar visualization */}
-              <div className="h-32 flex items-end gap-1 sm:gap-2 pt-4 overflow-x-auto">
-                {performance.timeseries.map((pt, idx) => {
-                  const maxClicks = Math.max(...performance.timeseries.map((p) => p.clicks), 1);
-                  const heightPercent = Math.min(100, Math.max(10, Math.round((pt.clicks / maxClicks) * 100)));
-
-                  return (
-                    <div
-                      key={idx}
-                      className="flex-1 min-w-[12px] flex flex-col items-center gap-1 group relative"
-                    >
-                      {/* Hover Tooltip */}
-                      <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col bg-zinc-900 border border-zinc-700 px-2 py-1 rounded shadow-xl text-[10px] whitespace-nowrap z-30">
-                        <span className="font-semibold text-zinc-200">{pt.date}</span>
-                        <span className="text-emerald-400">{pt.clicks} clicks</span>
-                        <span className="text-cyan-400">{pt.impressions} imp</span>
-                        <span className="text-zinc-400">Rank: {pt.position}</span>
-                      </div>
-
-                      <div
-                        style={{ height: `${heightPercent}%` }}
-                        className="w-full bg-emerald-500/80 hover:bg-emerald-400 rounded-t transition"
-                      />
-                      <span className="text-[9px] font-mono text-zinc-400 truncate w-full text-center">
-                        {pt.date.slice(-2)}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+            <DualAxisTrendChart
+              timeseries={performance.timeseries}
+              period={performance.period}
+              dataSource={performance.data_source}
+            />
           )}
 
           {/* Sub Navigation Tabs */}
@@ -677,7 +968,21 @@ export function SearchPerformanceView({
 
           {/* Tab 1: Queries Table */}
           {activeTab === 'queries' && (
-            <div className="bg-zinc-950 border border-zinc-800/80 rounded-2xl overflow-hidden shadow-sm">
+            <div className="space-y-3">
+              {performance?.summary?.anonymized_query_clicks !== undefined &&
+                performance.summary.anonymized_query_clicks > 0 && (
+                  <div className="px-4 py-2.5 rounded-xl bg-zinc-900/70 border border-zinc-800 text-[11px] text-zinc-400 flex items-center gap-2">
+                    <Info className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                    <span>
+                      <strong className="text-zinc-200">
+                        {performance.summary.anonymized_query_clicks.toLocaleString()} anonymized long-tail clicks
+                      </strong>{' '}
+                      are hidden from individual query rows by Google Search Console for user privacy — your KPI totals (
+                      {performance.summary.clicks.toLocaleString()} clicks) and daily trend chart include 100% of verified traffic.
+                    </span>
+                  </div>
+                )}
+              <div className="bg-zinc-950 border border-zinc-800/80 rounded-2xl overflow-hidden shadow-sm">
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
                   <thead className="bg-zinc-900/60 text-zinc-400 font-semibold border-b border-zinc-800">
@@ -758,6 +1063,7 @@ export function SearchPerformanceView({
                   </tbody>
                 </table>
               </div>
+            </div>
             </div>
           )}
 
@@ -871,7 +1177,7 @@ export function SearchPerformanceView({
                   {performance?.countries && performance.countries.length > 0 ? (
                     performance.countries.map((c, idx) => (
                       <div key={idx} className="flex items-center justify-between text-xs">
-                        <span className="font-mono text-zinc-200">{c.country}</span>
+                        <span className="font-mono text-zinc-200">{formatIso3Country(c.country)}</span>
                         <div className="flex items-center gap-3">
                           <span className="font-mono font-semibold text-emerald-400">
                             {c.clicks.toLocaleString()} clicks

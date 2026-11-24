@@ -213,6 +213,189 @@ class SearchPerformanceAndKeywordsTest extends TestCase
         $this->assertNotEmpty($perfRes->json('data.pages'));
     }
 
+    public function test_live_gsc_performance_matches_exact_untruncated_totals_and_date_window(): void
+    {
+        // Create a live (non-sandbox) connected GSC integration
+        WebsiteIntegration::create([
+            'organization_id' => $this->org->id,
+            'website_id' => $this->website->id,
+            'provider' => WebsiteIntegration::PROVIDER_GSC,
+            'status' => WebsiteIntegration::STATUS_CONNECTED,
+            'encrypted_credentials' => [
+                'access_token' => 'live_gsc_token_exact_test',
+                'refresh_token' => 'live_gsc_refresh_exact_test',
+                'expires_at' => now()->addHour()->timestamp,
+                'token_type' => 'Bearer',
+                'is_sandbox' => false,
+            ],
+            'metadata' => [
+                'account_connected' => true,
+                'is_sandbox' => false,
+                'selected_property' => 'https://handymansuperservices.com/',
+                'properties' => [
+                    ['siteUrl' => 'https://handymansuperservices.com/', 'permissionLevel' => 'siteFullUser'],
+                ],
+            ],
+        ]);
+
+        // Mock Google Search Console searchAnalytics/query API responses matching real GSC UI:
+        // Total site clicks = 26, impressions = 7870, position = 41.2 (even though visible query rows only have 6 clicks!)
+        Http::fake([
+            'https://www.googleapis.com/webmasters/v3/sites/*/searchAnalytics/query' => function (\Illuminate\Http\Client\Request $req) {
+                $body = $req->data();
+                $dims = $body['dimensions'] ?? [];
+                $startDate = $body['startDate'] ?? '';
+
+                // Latest-date anchor detection (14d date query)
+                if ($dims === ['date'] && ($body['rowLimit'] ?? 0) === 20) {
+                    return Http::response([
+                        'rows' => [
+                            ['keys' => ['2026-11-21'], 'clicks' => 1, 'impressions' => 250, 'ctr' => 0.004, 'position' => 40.5],
+                            ['keys' => ['2026-11-22'], 'clicks' => 1, 'impressions' => 280, 'ctr' => 0.0036, 'position' => 41.0],
+                        ],
+                    ], 200);
+                }
+
+                // Exact aggregate summary (dimensions: [])
+                if (empty($dims)) {
+                    if ($startDate === '2026-10-26') {
+                        return Http::response([
+                            'rows' => [
+                                ['clicks' => 26, 'impressions' => 7870, 'ctr' => 0.0033036, 'position' => 41.2],
+                            ],
+                        ], 200);
+                    }
+                    // Previous 28d period (2026-09-28 .. 2026-10-25)
+                    return Http::response([
+                        'rows' => [
+                            ['clicks' => 18, 'impressions' => 6100, 'ctr' => 0.00295, 'position' => 43.8],
+                        ],
+                    ], 200);
+                }
+
+                // Exact daily timeseries (dimensions: ['date'])
+                if ($dims === ['date']) {
+                    return Http::response([
+                        'rows' => [
+                            ['keys' => ['2026-10-26'], 'clicks' => 2, 'impressions' => 280, 'ctr' => 0.0071, 'position' => 40.1],
+                            ['keys' => ['2026-11-02'], 'clicks' => 3, 'impressions' => 310, 'ctr' => 0.0097, 'position' => 39.4],
+                            ['keys' => ['2026-11-22'], 'clicks' => 1, 'impressions' => 280, 'ctr' => 0.0036, 'position' => 41.0],
+                        ],
+                    ], 200);
+                }
+
+                // Query table (only 6 visible clicks due to 20 anonymized long-tail queries!)
+                if ($dims === ['query']) {
+                    return Http::response([
+                        'rows' => [
+                            ['keys' => ['repair hot water system'], 'clicks' => 4, 'impressions' => 420, 'ctr' => 0.0095, 'position' => 9.1],
+                            ['keys' => ['handyman singapore'], 'clicks' => 2, 'impressions' => 1850, 'ctr' => 0.0011, 'position' => 44.3],
+                        ],
+                    ], 200);
+                }
+
+                // Pages table
+                if ($dims === ['page']) {
+                    return Http::response([
+                        'rows' => [
+                            ['keys' => ['https://handymansuperservices.com/'], 'clicks' => 26, 'impressions' => 7870, 'ctr' => 0.0033, 'position' => 41.2],
+                        ],
+                    ], 200);
+                }
+
+                // Devices table
+                if ($dims === ['device']) {
+                    return Http::response([
+                        'rows' => [
+                            ['keys' => ['MOBILE'], 'clicks' => 19, 'impressions' => 5400, 'ctr' => 0.0035, 'position' => 40.2],
+                            ['keys' => ['DESKTOP'], 'clicks' => 7, 'impressions' => 2470, 'ctr' => 0.0028, 'position' => 43.4],
+                        ],
+                    ], 200);
+                }
+
+                // Countries table
+                if ($dims === ['country']) {
+                    return Http::response([
+                        'rows' => [
+                            ['keys' => ['sgp'], 'clicks' => 24, 'impressions' => 7200, 'ctr' => 0.0033, 'position' => 40.8],
+                            ['keys' => ['usa'], 'clicks' => 2, 'impressions' => 670, 'ctr' => 0.0030, 'position' => 45.5],
+                        ],
+                    ], 200);
+                }
+
+                return Http::response(['rows' => []], 200);
+            },
+        ]);
+
+        $perfRes = $this->actingAs($this->user)
+            ->withHeader('X-Organization-Id', $this->org->id)
+            ->getJson("/api/v1/websites/{$this->website->id}/search-console/performance?range=28d");
+
+        $perfRes->assertOk()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('data.data_source', 'google_search_console_live')
+            ->assertJsonPath('data.period.start_date', '2026-10-26')
+            ->assertJsonPath('data.period.end_date', '2026-11-22')
+            ->assertJsonPath('data.summary.clicks', 26)
+            ->assertJsonPath('data.summary.impressions', 7870)
+            ->assertJsonPath('data.summary.ctr', 0.33)
+            ->assertJsonPath('data.summary.position', 41.2)
+            ->assertJsonPath('data.summary.anonymized_query_clicks', 20)
+            ->assertJsonPath('data.summary.comparison.diff_clicks', 8)
+            ->assertJsonPath('data.summary.comparison.diff_impressions', 1770)
+            ->assertJsonPath('data.countries.0.country', 'SGP')
+            ->assertJsonPath('data.countries.0.clicks', 24);
+
+        // Continuous 28-day timeseries (Oct 26 .. Nov 22 = 28 points)
+        $this->assertCount(28, $perfRes->json('data.timeseries'));
+    }
+
+    public function test_db_fallback_uses_impression_weighted_average_position(): void
+    {
+        $today = now()->subDays(2)->toDateString();
+
+        // Row 1: 990 impressions at position 10.0; Row 2: 10 impressions at position 90.0
+        // Unweighted avg would be 50.0 (WRONG); Impression-weighted avg is (990*10 + 10*90)/1000 = 10.8 (EXACT)
+        SearchPerformanceRecord::create([
+            'organization_id' => $this->org->id,
+            'website_id' => $this->website->id,
+            'property_id' => 'https://techboloy.com/',
+            'date' => $today,
+            'page' => 'https://techboloy.com/a',
+            'query' => 'main keyword',
+            'country' => 'SGP',
+            'device' => 'MOBILE',
+            'clicks' => 25,
+            'impressions' => 990,
+            'ctr' => 0.0253,
+            'position' => 10.0,
+        ]);
+
+        SearchPerformanceRecord::create([
+            'organization_id' => $this->org->id,
+            'website_id' => $this->website->id,
+            'property_id' => 'https://techboloy.com/',
+            'date' => $today,
+            'page' => 'https://techboloy.com/b',
+            'query' => 'rare keyword',
+            'country' => 'SGP',
+            'device' => 'DESKTOP',
+            'clicks' => 0,
+            'impressions' => 10,
+            'ctr' => 0.0,
+            'position' => 90.0,
+        ]);
+
+        $perfRes = $this->actingAs($this->user)
+            ->withHeader('X-Organization-Id', $this->org->id)
+            ->getJson("/api/v1/websites/{$this->website->id}/search-console/performance?range=28d");
+
+        $perfRes->assertOk()
+            ->assertJsonPath('data.summary.clicks', 25)
+            ->assertJsonPath('data.summary.impressions', 1000)
+            ->assertJsonPath('data.summary.position', 10.8);
+    }
+
     public function test_url_inspection_returns_disclaimer_and_index_state(): void
     {
         $service = app(GoogleSearchConsoleService::class);

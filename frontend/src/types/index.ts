@@ -487,6 +487,8 @@ export interface SearchConsoleStatus {
 }
 
 export interface SearchPerformanceData {
+  data_source?: 'google_search_console_live' | 'synced_database' | 'sandbox';
+  property_id?: string;
   period: {
     start_date: string;
     end_date: string;
@@ -498,6 +500,7 @@ export interface SearchPerformanceData {
     impressions: number;
     ctr: number;
     position: number;
+    anonymized_query_clicks?: number;
     comparison: {
       previous_clicks: number;
       previous_impressions: number;

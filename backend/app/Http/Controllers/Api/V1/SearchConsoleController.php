@@ -264,13 +264,58 @@ class SearchConsoleController extends Controller
         $this->authorizeWebsite($request, $website);
 
         // Date range parsing (default: last 28 days)
-        $range = $request->input('range', '28d');
-        $endDate = Carbon::parse($request->input('end_date', now()->subDays(1)->toDateString()));
-        
+        $range = (string) $request->input('range', '28d');
+        $customStart = $request->input('start_date');
+        $customEnd = $request->input('end_date');
+        $forceRefresh = $request->boolean('refresh', false);
+
+        // Optional filters
+        $country = $request->input('country');
+        $device = $request->input('device');
+        $queryFilter = $request->input('query');
+        $pageFilter = $request->input('page');
+
+        // 1. Live Google Search Console exact query (100% parity with official GSC UI)
+        try {
+            $liveData = $this->gscService->fetchLivePerformanceReport(
+                $website,
+                $range,
+                $customStart ? (string) $customStart : null,
+                $customEnd ? (string) $customEnd : null,
+                [
+                    'country' => $country,
+                    'device' => $device,
+                    'query' => $queryFilter,
+                    'page' => $pageFilter,
+                ],
+                $forceRefresh
+            );
+
+            if ($liveData !== null) {
+                return response()->json([
+                    'success' => true,
+                    'data' => $liveData,
+                ]);
+            }
+        } catch (Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('Live GSC performance query failed, falling back to synced DB records', [
+                'website_id' => $website->id,
+                'error' => $e->getMessage(),
+            ]);
+        }
+
+        // 2. Database / Sandbox fallback path (with impression-weighted average position)
+        $latestRecordDate = SearchPerformanceRecord::where('website_id', $website->id)->max('date');
+        $defaultEnd = $latestRecordDate
+            ? Carbon::parse($latestRecordDate)
+            : now()->subDays(1);
+
+        $endDate = $customEnd ? Carbon::parse($customEnd) : $defaultEnd;
+
         $startDate = match ($range) {
             '7d' => (clone $endDate)->subDays(6),
-            '3m' => (clone $endDate)->subDays(89),
-            'custom' => Carbon::parse($request->input('start_date', now()->subDays(27)->toDateString())),
+            '3m', '90d' => (clone $endDate)->subDays(89),
+            'custom' => Carbon::parse($customStart ?: (clone $endDate)->subDays(27)->toDateString()),
             default => (clone $endDate)->subDays(27), // '28d'
         };
 
@@ -283,16 +328,11 @@ class SearchConsoleController extends Controller
         $prevStartStr = $prevStartDate->toDateString();
         $prevEndStr = $prevEndDate->toDateString();
 
-        // Optional filters
-        $country = $request->input('country');
-        $device = $request->input('device');
-        $queryFilter = $request->input('query');
-        $pageFilter = $request->input('page');
-
         // Base query helper
         $buildQuery = function (string $from, string $to) use ($website, $country, $device, $queryFilter, $pageFilter) {
             $q = SearchPerformanceRecord::where('website_id', $website->id)
-                ->whereBetween('date', [$from, $to]);
+                ->whereDate('date', '>=', $from)
+                ->whereDate('date', '<=', $to);
 
             if ($country) $q->where('country', strtoupper($country));
             if ($device) $q->where('device', strtoupper($device));
@@ -302,31 +342,43 @@ class SearchConsoleController extends Controller
             return $q;
         };
 
-        // 1. Current Period Summary
+        $weightedPosSql = 'CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions * 1.0) / SUM(impressions) ELSE 0 END';
+
+        // 1. Current Period Summary (impression-weighted position)
         $currStats = $buildQuery($startStr, $endStr)
             ->selectRaw('SUM(clicks) as total_clicks')
             ->selectRaw('SUM(impressions) as total_impressions')
-            ->selectRaw('AVG(ctr) as avg_ctr')
-            ->selectRaw('AVG(position) as avg_position')
+            ->selectRaw("{$weightedPosSql} as avg_position")
             ->first();
 
         // 2. Previous Period Summary for Comparison
         $prevStats = $buildQuery($prevStartStr, $prevEndStr)
             ->selectRaw('SUM(clicks) as total_clicks')
             ->selectRaw('SUM(impressions) as total_impressions')
-            ->selectRaw('AVG(ctr) as avg_ctr')
-            ->selectRaw('AVG(position) as avg_position')
+            ->selectRaw("{$weightedPosSql} as avg_position")
             ->first();
 
         $currClicks = (int) ($currStats->total_clicks ?? 0);
         $currImp = (int) ($currStats->total_impressions ?? 0);
         $currCtr = $currImp > 0 ? round(($currClicks / $currImp) * 100, 2) : 0.0;
-        $currPos = round((float) ($currStats->avg_position ?? 0), 1);
+        $currPos = $currImp > 0 ? round((float) ($currStats->avg_position ?? 0), 1) : 0.0;
+
+        // If unfiltered fallback has an exact GSC snapshot cached on integration metadata, prefer its exact totals
+        $hasFilters = (bool) ($country || $device || $queryFilter || $pageFilter);
+        $integration = $website->gscIntegration;
+        $snapKey = $range === '3m' ? '90d' : $range;
+        $exactSnap = (!$hasFilters && $integration) ? ($integration->metadata['exact_snapshots'][$snapKey] ?? null) : null;
+        if (is_array($exactSnap) && isset($exactSnap['clicks'], $exactSnap['impressions'])) {
+            $currClicks = (int) $exactSnap['clicks'];
+            $currImp = (int) $exactSnap['impressions'];
+            $currCtr = (float) ($exactSnap['ctr'] ?? ($currImp > 0 ? round(($currClicks / $currImp) * 100, 2) : 0.0));
+            $currPos = (float) ($exactSnap['position'] ?? $currPos);
+        }
 
         $prevClicks = (int) ($prevStats->total_clicks ?? 0);
         $prevImp = (int) ($prevStats->total_impressions ?? 0);
         $prevCtr = $prevImp > 0 ? round(($prevClicks / $prevImp) * 100, 2) : 0.0;
-        $prevPos = round((float) ($prevStats->avg_position ?? 0), 1);
+        $prevPos = $prevImp > 0 ? round((float) ($prevStats->avg_position ?? 0), 1) : 0.0;
 
         // Delta calculations
         $diffClicks = $currClicks - $prevClicks;
@@ -339,7 +391,7 @@ class SearchConsoleController extends Controller
             ->select('date')
             ->selectRaw('SUM(clicks) as clicks')
             ->selectRaw('SUM(impressions) as impressions')
-            ->selectRaw('AVG(position) as position')
+            ->selectRaw("{$weightedPosSql} as position")
             ->groupBy('date')
             ->orderBy('date')
             ->get()
@@ -358,12 +410,13 @@ class SearchConsoleController extends Controller
             ->select('query')
             ->selectRaw('SUM(clicks) as clicks')
             ->selectRaw('SUM(impressions) as impressions')
-            ->selectRaw('AVG(position) as position')
+            ->selectRaw("{$weightedPosSql} as position")
             ->whereNotNull('query')
             ->where('query', '!=', '')
             ->groupBy('query')
             ->orderByDesc('clicks')
-            ->limit(50)
+            ->orderByDesc('impressions')
+            ->limit(100)
             ->get()
             ->map(function ($row) {
                 return [
@@ -380,10 +433,11 @@ class SearchConsoleController extends Controller
             ->select('page')
             ->selectRaw('SUM(clicks) as clicks')
             ->selectRaw('SUM(impressions) as impressions')
-            ->selectRaw('AVG(position) as position')
+            ->selectRaw("{$weightedPosSql} as position")
             ->groupBy('page')
             ->orderByDesc('clicks')
-            ->limit(50)
+            ->orderByDesc('impressions')
+            ->limit(100)
             ->get()
             ->map(function ($row) {
                 return [
@@ -412,12 +466,16 @@ class SearchConsoleController extends Controller
             ->whereNotNull('country')
             ->groupBy('country')
             ->orderByDesc('clicks')
-            ->limit(10)
+            ->orderByDesc('impressions')
+            ->limit(25)
             ->get();
+
+        $isSandbox = !empty($integration?->metadata['is_sandbox']);
 
         return response()->json([
             'success' => true,
             'data' => [
+                'data_source' => $isSandbox ? 'sandbox' : 'synced_database',
                 'period' => [
                     'start_date' => $startStr,
                     'end_date' => $endStr,

@@ -28,11 +28,11 @@ class RankCheckerService
     public function getContext(Website $website): array
     {
         $gscKeywords = SearchPerformanceRecord::where('website_id', $website->id)
-            ->where('date', '>=', now()->subDays(28)->toDateString())
+            ->where('date', '>=', now()->subDays(31)->toDateString())
             ->whereNotNull('query')
             ->where('query', '!=', '')
             ->select('query')
-            ->selectRaw('SUM(clicks) as clicks, SUM(impressions) as impressions, AVG(position) as avg_position')
+            ->selectRaw('SUM(clicks) as clicks, SUM(impressions) as impressions, CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions * 1.0) / SUM(impressions) ELSE 0 END as avg_position')
             ->groupBy('query')
             ->orderByDesc('impressions')
             ->limit(25)
@@ -526,9 +526,9 @@ class RankCheckerService
         int $depth
     ): array {
         $row = SearchPerformanceRecord::where('website_id', $website->id)
-            ->where('date', '>=', now()->subDays(28)->toDateString())
+            ->where('date', '>=', now()->subDays(31)->toDateString())
             ->whereRaw('LOWER(query) = ?', [strtolower($keyword)])
-            ->selectRaw('SUM(clicks) as clicks, SUM(impressions) as impressions, AVG(position) as avg_pos, MAX(page) as top_url')
+            ->selectRaw('SUM(clicks) as clicks, SUM(impressions) as impressions, CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions * 1.0) / SUM(impressions) ELSE 0 END as avg_pos, MAX(page) as top_url')
             ->first();
 
         if (!$row || (int) $row->impressions === 0) {

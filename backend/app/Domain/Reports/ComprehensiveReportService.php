@@ -566,65 +566,124 @@ class ComprehensiveReportService
 
     private function collectSearchConsole(Website $website, ?Carbon $since): array
     {
-        $base = SearchPerformanceRecord::where('website_id', $website->id);
-        if ($since) {
-            $base->where('date', '>=', $since->toDateString());
+        // Prefer live exact GSC totals & breakdowns when live Google Search Console is connected
+        $rangeKey = match (true) {
+            $since === null => '90d',
+            $since->diffInDays(now()) <= 8 => '7d',
+            $since->diffInDays(now()) <= 35 => '28d',
+            default => '90d',
+        };
+
+        $liveGsc = null;
+        try {
+            $liveGsc = app(\App\Domain\SearchConsole\GoogleSearchConsoleService::class)
+                ->fetchLivePerformanceReport($website, $rangeKey);
+        } catch (\Throwable) {
+            $liveGsc = null;
         }
 
-        $totals = (clone $base)
-            ->selectRaw('COALESCE(SUM(clicks), 0) as clicks, COALESCE(SUM(impressions), 0) as impressions, COALESCE(AVG(position), 0) as avg_pos')
-            ->first();
+        if (is_array($liveGsc) && isset($liveGsc['summary'])) {
+            $clicks = (int) ($liveGsc['summary']['clicks'] ?? 0);
+            $impressions = (int) ($liveGsc['summary']['impressions'] ?? 0);
+            $ctr = (float) ($liveGsc['summary']['ctr'] ?? 0.0);
+            $avgPos = (float) ($liveGsc['summary']['position'] ?? 0.0);
 
-        $clicks = (int) ($totals->clicks ?? 0);
-        $impressions = (int) ($totals->impressions ?? 0);
-        $ctr = $impressions > 0 ? round(($clicks / $impressions) * 100, 2) : 0.0;
-        $avgPos = $impressions > 0 ? round((float) ($totals->avg_pos ?? 0), 1) : 0.0;
-
-        $queries = (clone $base)
-            ->whereNotNull('query')
-            ->where('query', '!=', '')
-            ->select('query')
-            ->selectRaw('SUM(clicks) as clicks, SUM(impressions) as impressions, AVG(position) as avg_pos')
-            ->groupBy('query')
-            ->orderByDesc('clicks')
-            ->orderByDesc('impressions')
-            ->limit(150)
-            ->get()
-            ->map(function ($row) {
-                $c = (int) $row->clicks;
-                $i = (int) $row->impressions;
-                $pos = round((float) $row->avg_pos, 1);
+            $queries = array_map(function ($row) {
+                $pos = round((float) ($row['position'] ?? 0), 1);
                 return [
-                    'query' => (string) $row->query,
-                    'clicks' => $c,
-                    'impressions' => $i,
-                    'ctr' => $i > 0 ? round(($c / $i) * 100, 2) : 0.0,
+                    'query' => (string) ($row['query'] ?? ''),
+                    'clicks' => (int) ($row['clicks'] ?? 0),
+                    'impressions' => (int) ($row['impressions'] ?? 0),
+                    'ctr' => (float) ($row['ctr'] ?? 0.0),
                     'avg_position' => $pos,
                     'estimated_page' => max(1, (int) ceil($pos / 10)),
                 ];
-            })->values()->toArray();
+            }, $liveGsc['queries'] ?? []);
 
-        $pages = (clone $base)
-            ->whereNotNull('page')
-            ->where('page', '!=', '')
-            ->select('page')
-            ->selectRaw('SUM(clicks) as clicks, SUM(impressions) as impressions, AVG(position) as avg_pos')
-            ->groupBy('page')
-            ->orderByDesc('clicks')
-            ->orderByDesc('impressions')
-            ->limit(100)
-            ->get()
-            ->map(function ($row) {
-                $c = (int) $row->clicks;
-                $i = (int) $row->impressions;
+            $pages = array_map(function ($row) {
                 return [
-                    'page' => (string) $row->page,
-                    'clicks' => $c,
-                    'impressions' => $i,
-                    'ctr' => $i > 0 ? round(($c / $i) * 100, 2) : 0.0,
-                    'avg_position' => round((float) $row->avg_pos, 1),
+                    'page' => (string) ($row['page'] ?? ''),
+                    'clicks' => (int) ($row['clicks'] ?? 0),
+                    'impressions' => (int) ($row['impressions'] ?? 0),
+                    'ctr' => (float) ($row['ctr'] ?? 0.0),
+                    'avg_position' => round((float) ($row['position'] ?? 0), 1),
                 ];
-            })->values()->toArray();
+            }, $liveGsc['pages'] ?? []);
+        } else {
+            $base = SearchPerformanceRecord::where('website_id', $website->id);
+            if ($since) {
+                $base->where('date', '>=', $since->toDateString());
+            }
+
+            $weightedPosSql = 'CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions * 1.0) / SUM(impressions) ELSE 0 END';
+
+            $totals = (clone $base)
+                ->selectRaw("COALESCE(SUM(clicks), 0) as clicks, COALESCE(SUM(impressions), 0) as impressions, {$weightedPosSql} as avg_pos")
+                ->first();
+
+            $clicks = (int) ($totals->clicks ?? 0);
+            $impressions = (int) ($totals->impressions ?? 0);
+            $ctr = $impressions > 0 ? round(($clicks / $impressions) * 100, 2) : 0.0;
+            $avgPos = $impressions > 0 ? round((float) ($totals->avg_pos ?? 0), 1) : 0.0;
+
+            // Use exact cached GSC snapshot totals when available on integration metadata
+            $integration = $website->gscIntegration;
+            $snap = $integration?->metadata['exact_snapshots'][$rangeKey]
+                ?? $integration?->metadata['exact_snapshots']['28d']
+                ?? null;
+            if (is_array($snap) && isset($snap['clicks'], $snap['impressions'])) {
+                $clicks = (int) $snap['clicks'];
+                $impressions = (int) $snap['impressions'];
+                $ctr = (float) ($snap['ctr'] ?? $ctr);
+                $avgPos = (float) ($snap['position'] ?? $avgPos);
+            }
+
+            $queries = (clone $base)
+                ->whereNotNull('query')
+                ->where('query', '!=', '')
+                ->select('query')
+                ->selectRaw("SUM(clicks) as clicks, SUM(impressions) as impressions, {$weightedPosSql} as avg_pos")
+                ->groupBy('query')
+                ->orderByDesc('clicks')
+                ->orderByDesc('impressions')
+                ->limit(150)
+                ->get()
+                ->map(function ($row) {
+                    $c = (int) $row->clicks;
+                    $i = (int) $row->impressions;
+                    $pos = round((float) $row->avg_pos, 1);
+                    return [
+                        'query' => (string) $row->query,
+                        'clicks' => $c,
+                        'impressions' => $i,
+                        'ctr' => $i > 0 ? round(($c / $i) * 100, 2) : 0.0,
+                        'avg_position' => $pos,
+                        'estimated_page' => max(1, (int) ceil($pos / 10)),
+                    ];
+                })->values()->toArray();
+
+            $pages = (clone $base)
+                ->whereNotNull('page')
+                ->where('page', '!=', '')
+                ->select('page')
+                ->selectRaw("SUM(clicks) as clicks, SUM(impressions) as impressions, {$weightedPosSql} as avg_pos")
+                ->groupBy('page')
+                ->orderByDesc('clicks')
+                ->orderByDesc('impressions')
+                ->limit(100)
+                ->get()
+                ->map(function ($row) {
+                    $c = (int) $row->clicks;
+                    $i = (int) $row->impressions;
+                    return [
+                        'page' => (string) $row->page,
+                        'clicks' => $c,
+                        'impressions' => $i,
+                        'ctr' => $i > 0 ? round(($c / $i) * 100, 2) : 0.0,
+                        'avg_position' => round((float) $row->avg_pos, 1),
+                    ];
+                })->values()->toArray();
+        }
 
         $opportunities = SearchOpportunity::where('website_id', $website->id)
             ->orderByDesc('impact_score')

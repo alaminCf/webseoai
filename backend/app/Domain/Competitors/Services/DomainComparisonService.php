@@ -174,22 +174,30 @@ class DomainComparisonService
 
             // First-party verified Google Search Console performance (if connected)
             $gscStats = SearchPerformanceRecord::where('website_id', $website->id)
-                ->where('date', '>=', now()->subDays(28)->toDateString())
+                ->where('date', '>=', now()->subDays(31)->toDateString())
                 ->selectRaw('SUM(clicks) as clicks, SUM(impressions) as impressions, COUNT(DISTINCT query) as queries')
                 ->first();
 
-            if ($gscStats && ((int) $gscStats->queries > 0)) {
-                $crawledSignals['gsc_28d_clicks'] = (int) $gscStats->clicks;
-                $crawledSignals['gsc_28d_impressions'] = (int) $gscStats->impressions;
-                $crawledSignals['gsc_unique_queries'] = (int) $gscStats->queries;
+            $exactGscSnap = $website->gscIntegration?->metadata['exact_snapshots']['28d'] ?? null;
+            if (($gscStats && ((int) $gscStats->queries > 0)) || is_array($exactGscSnap)) {
+                $crawledSignals['gsc_28d_clicks'] = is_array($exactGscSnap)
+                    ? (int) ($exactGscSnap['clicks'] ?? 0)
+                    : (int) ($gscStats->clicks ?? 0);
+                $crawledSignals['gsc_28d_impressions'] = is_array($exactGscSnap)
+                    ? (int) ($exactGscSnap['impressions'] ?? 0)
+                    : (int) ($gscStats->impressions ?? 0);
+                $crawledSignals['gsc_unique_queries'] = (int) ($gscStats->queries ?? 0);
 
                 if (empty($topKeywords)) {
                     $topKeywords = SearchPerformanceRecord::where('website_id', $website->id)
-                        ->where('date', '>=', now()->subDays(28)->toDateString())
+                        ->where('date', '>=', now()->subDays(31)->toDateString())
+                        ->whereNotNull('query')
+                        ->where('query', '!=', '')
                         ->select('query')
-                        ->selectRaw('SUM(clicks) as clicks, SUM(impressions) as impressions, AVG(position) as position')
+                        ->selectRaw('SUM(clicks) as clicks, SUM(impressions) as impressions, CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions * 1.0) / SUM(impressions) ELSE 0 END as position')
                         ->groupBy('query')
                         ->orderByDesc('clicks')
+                        ->orderByDesc('impressions')
                         ->limit(10)
                         ->get()
                         ->map(fn ($r) => [
