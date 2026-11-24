@@ -165,6 +165,47 @@ class SearchPerformanceAndKeywordsTest extends TestCase
         $this->assertStringContainsString("website_id={$this->website->id}", $cancelRes->headers->get('Location'));
     }
 
+    public function test_gsc_callback_rejects_token_missing_webmasters_scope_from_granular_consent(): void
+    {
+        config([
+            'search_console.client_id' => 'test-client-id.apps.googleusercontent.com',
+            'search_console.client_secret' => 'test-client-secret',
+            'search_console.redirect_uri' => 'https://webseoai.vercel.app/api/v1/integrations/google-search-console/callback',
+            'search_console.frontend_url' => 'https://webseoai.vercel.app',
+        ]);
+
+        // Simulate user clicking Continue on Google's granular consent screen WITHOUT checking Search Console scope
+        Http::fake([
+            'https://oauth2.googleapis.com/token' => Http::response([
+                'access_token' => 'scope_missing_token_123',
+                'refresh_token' => 'refresh_123',
+                'expires_in' => 3600,
+                'token_type' => 'Bearer',
+                'scope' => 'openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile',
+            ], 200),
+        ]);
+
+        $state = base64_encode(json_encode([
+            'website_id' => $this->website->id,
+            'organization_id' => $this->org->id,
+            'user_id' => $this->user->id,
+            'timestamp' => now()->timestamp,
+        ]));
+
+        $res = $this->get('/api/v1/integrations/google-search-console/callback?code=no_scope_code&state=' . urlencode($state));
+        $res->assertStatus(302);
+        $location = (string) $res->headers->get('Location');
+        $this->assertStringContainsString('gsc=error', $location);
+        $this->assertStringContainsString('View+Search+Console+data', $location);
+
+        // Must NOT save a broken "connected" integration record
+        $this->assertDatabaseMissing('website_integrations', [
+            'website_id' => $this->website->id,
+            'provider' => WebsiteIntegration::PROVIDER_GSC,
+            'status' => WebsiteIntegration::STATUS_CONNECTED,
+        ]);
+    }
+
     public function test_search_analytics_synchronization_and_performance_querying(): void
     {
         // Connect sandbox

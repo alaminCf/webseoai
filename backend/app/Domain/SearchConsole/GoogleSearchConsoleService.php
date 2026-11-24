@@ -75,9 +75,10 @@ class GoogleSearchConsoleService
             'client_id' => $this->clientId,
             'redirect_uri' => $this->redirectUri,
             'response_type' => 'code',
-            'scope' => implode(' ', $this->scopes),
+            // Request ONLY the Search Console read scope so Google presents a clean single-permission
+            // consent prompt instead of multi-checkbox granular permissions users often leave unchecked.
+            'scope' => 'https://www.googleapis.com/auth/webmasters.readonly',
             'access_type' => 'offline',
-            'include_granted_scopes' => 'true',
             'prompt' => 'consent select_account',
             'state' => $state,
         ]);
@@ -125,9 +126,28 @@ class GoogleSearchConsoleService
         $accessToken = $tokenData['access_token'] ?? null;
         $refreshToken = $tokenData['refresh_token'] ?? null;
         $expiresIn = $tokenData['expires_in'] ?? 3600;
+        $grantedScope = trim((string) ($tokenData['scope'] ?? ''));
+        $oauthIntent = (string) ($decodedState['intent'] ?? 'gsc');
 
         if (!$accessToken) {
             throw new Exception('No access token returned from Google.');
+        }
+
+        // Guard against Google's Granular Permissions screen where users click Continue without
+        // checking the required Search Console / Analytics permission checkbox.
+        $hasWebmastersScope = $grantedScope === '' || str_contains($grantedScope, 'webmasters');
+        $hasAnalyticsScope = $grantedScope === '' || str_contains($grantedScope, 'analytics.readonly');
+
+        if ($oauthIntent === 'ga4' && !$hasAnalyticsScope) {
+            throw new Exception(
+                'Google Analytics permission was not granted. Please click Connect again and make sure to check "See and download your Google Analytics data" on Google\'s permission screen.'
+            );
+        }
+
+        if ($oauthIntent !== 'ga4' && !$hasWebmastersScope) {
+            throw new Exception(
+                'Google Search Console permission was not granted. Please click "Connect Search Console" again and check the box "View Search Console data for your verified sites" before clicking Continue.'
+            );
         }
 
         // Preserve existing refresh_token if Google omits it on re-authorization
@@ -146,53 +166,66 @@ class GoogleSearchConsoleService
             'refresh_token' => $refreshToken,
             'expires_at' => now()->addSeconds($expiresIn)->timestamp,
             'token_type' => $tokenData['token_type'] ?? 'Bearer',
-            'scope' => $tokenData['scope'] ?? '',
+            'scope' => $grantedScope,
             'is_sandbox' => false,
         ];
 
-        // Fetch user's verified properties to auto-select best match
-        $properties = $this->fetchPropertiesFromGoogle($accessToken);
-        $selectedProperty = $this->determineBestMatchingProperty($website, $properties);
+        $integration = null;
 
-        $integration = WebsiteIntegration::updateOrCreate(
-            [
-                'website_id' => $website->id,
-                'provider' => WebsiteIntegration::PROVIDER_GSC,
-            ],
-            [
-                'organization_id' => $website->organization_id,
-                'encrypted_credentials' => $credentials,
-                'status' => WebsiteIntegration::STATUS_CONNECTED,
-                'last_error' => null,
-                'metadata' => [
-                    'account_connected' => true,
-                    'is_sandbox' => false,
-                    'connected_at' => now()->toIso8601String(),
-                    'selected_property' => $selectedProperty,
-                    'properties' => $properties,
-                    'scope' => $tokenData['scope'] ?? implode(' ', $this->scopes),
+        // Only update/create GSC integration if webmasters scope was actually granted
+        if ($hasWebmastersScope) {
+            // Fetch user's verified properties to auto-select best match
+            $properties = $this->fetchPropertiesFromGoogle($accessToken);
+            $selectedProperty = $this->determineBestMatchingProperty($website, $properties);
+
+            $integration = WebsiteIntegration::updateOrCreate(
+                [
+                    'website_id' => $website->id,
+                    'provider' => WebsiteIntegration::PROVIDER_GSC,
                 ],
-            ]
-        );
+                [
+                    'organization_id' => $website->organization_id,
+                    'encrypted_credentials' => $credentials,
+                    'status' => WebsiteIntegration::STATUS_CONNECTED,
+                    'last_error' => null,
+                    'metadata' => [
+                        'account_connected' => true,
+                        'is_sandbox' => false,
+                        'connected_at' => now()->toIso8601String(),
+                        'selected_property' => $selectedProperty,
+                        'properties' => $properties,
+                        'scope' => $grantedScope !== '' ? $grantedScope : 'https://www.googleapis.com/auth/webmasters.readonly',
+                    ],
+                ]
+            );
 
-        // Auto-verify website ownership when Google confirms a matching verified property
-        if (!$website->isVerified() && $this->findMatchingVerifiedProperty($website, $properties) !== null) {
-            $website->update([
-                'verification_status' => Website::VERIFICATION_VERIFIED,
-                'verification_method' => 'google_search_console',
-                'verified_at' => now(),
-            ]);
+            // Auto-verify website ownership when Google confirms a matching verified property
+            if (!$website->isVerified() && $this->findMatchingVerifiedProperty($website, $properties) !== null) {
+                $website->update([
+                    'verification_status' => Website::VERIFICATION_VERIFIED,
+                    'verification_method' => 'google_search_console',
+                    'verified_at' => now(),
+                ]);
+            }
         }
 
         // Also store Google Analytics 4 integration automatically when analytics.readonly scope is granted (or intent=ga4)
-        $grantedScope = (string) ($credentials['scope'] ?? '');
-        if (($decodedState['intent'] ?? '') === 'ga4' || str_contains($grantedScope, 'analytics.readonly')) {
+        if ($oauthIntent === 'ga4' || str_contains($grantedScope, 'analytics.readonly')) {
             try {
-                app(\App\Domain\Traffic\GoogleAnalyticsService::class)->storeFromTokens($website, $credentials);
+                $ga4Integration = app(\App\Domain\Traffic\GoogleAnalyticsService::class)->storeFromTokens($website, $credentials);
+                if (!$integration) {
+                    $integration = $ga4Integration;
+                }
             } catch (Throwable $gaEx) {
                 Log::warning('GA4 auto-connect during Google OAuth callback skipped: ' . $gaEx->getMessage());
             }
         }
+
+        if (!$integration) {
+            throw new Exception('No valid Google Search Console or Analytics scope was granted.');
+        }
+
+        $this->invalidateCache($website->id);
 
         return $integration;
     }
@@ -1110,7 +1143,19 @@ class GoogleSearchConsoleService
         while (true) {
             $response = Http::withToken($accessToken)
                 ->timeout(30)
-                ->retry(config('search_console.max_retries', 3), config('search_console.retry_delay_ms', 1000))
+                ->retry(
+                    config('search_console.max_retries', 3),
+                    config('search_console.retry_delay_ms', 1000),
+                    function (Throwable $e): bool {
+                        if ($e instanceof \Illuminate\Http\Client\RequestException) {
+                            $status = $e->response?->status() ?? 0;
+                            // Only retry transient 429 / 5xx errors — never retry 401/403 permission errors
+                            return $status === 429 || $status >= 500;
+                        }
+                        return true;
+                    },
+                    throw: false
+                )
                 ->post($endpoint, [
                     'startDate' => $startDate,
                     'endDate' => $endDate,
@@ -1121,7 +1166,22 @@ class GoogleSearchConsoleService
                 ]);
 
             if (!$response->successful()) {
-                throw new Exception('Google Search Analytics Query failed: ' . ($response->json('error.message') ?? $response->body()));
+                $rawMsg = (string) ($response->json('error.message') ?? $response->body());
+                $lowerMsg = strtolower($rawMsg);
+
+                if ($response->status() === 403 && (str_contains($lowerMsg, 'insufficient authentication scopes') || str_contains($lowerMsg, 'scope_insufficient'))) {
+                    throw new Exception(
+                        'Missing Google Search Console permission. Click "Reconnect Search Console" and check the box "View Search Console data for your verified sites" on Google\'s permission screen.'
+                    );
+                }
+
+                if ($response->status() === 403 && str_contains($lowerMsg, 'sufficient permission for site')) {
+                    throw new Exception(
+                        "Your Google account does not have verified Search Console access to \"{$propertyId}\". Please select a verified property or verify this domain in Google Search Console."
+                    );
+                }
+
+                throw new Exception('Google Search Analytics Query failed: ' . $rawMsg);
             }
 
             $rawRows = $response->json('rows') ?? [];

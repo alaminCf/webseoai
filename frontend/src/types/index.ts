@@ -475,6 +475,7 @@ export interface SearchConsoleStatus {
   properties: Array<{ siteUrl: string; permissionLevel: string }>;
   last_synced_at: string | null;
   last_error: string | null;
+  scope_missing?: boolean;
   is_sandbox: boolean;
   oauth_mode?: 'live' | 'sandbox';
   redirect_uri?: string;

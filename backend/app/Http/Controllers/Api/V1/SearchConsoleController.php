@@ -183,6 +183,19 @@ class SearchConsoleController extends Controller
             ->latest()
             ->first();
 
+        $isSandbox = !empty($integration->metadata['is_sandbox']);
+        $grantedScope = (string) ($integration?->metadata['scope'] ?? '');
+        $lastErrLower = strtolower((string) ($integration?->last_error ?? ''));
+        $scopeMissing = $integration
+            && $integration->status === WebsiteIntegration::STATUS_CONNECTED
+            && !$isSandbox
+            && (
+                ($grantedScope !== '' && !str_contains($grantedScope, 'webmasters'))
+                || str_contains($lastErrLower, 'insufficient authentication scopes')
+                || str_contains($lastErrLower, 'missing google search console permission')
+                || str_contains($lastErrLower, 'permission was not granted')
+            );
+
         return response()->json([
             'success' => true,
             'data' => [
@@ -192,7 +205,8 @@ class SearchConsoleController extends Controller
                 'properties' => $integration->metadata['properties'] ?? [],
                 'last_synced_at' => $integration ? $integration->last_synced_at : null,
                 'last_error' => $integration ? $integration->last_error : null,
-                'is_sandbox' => !empty($integration->metadata['is_sandbox']),
+                'scope_missing' => $scopeMissing,
+                'is_sandbox' => $isSandbox,
                 'oauth_mode' => $this->gscService->isLiveConfigured() ? 'live' : 'sandbox',
                 'redirect_uri' => $this->gscService->getRedirectUri(),
                 'latest_sync_log' => $latestSync,

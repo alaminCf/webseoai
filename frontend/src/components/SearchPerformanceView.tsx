@@ -386,6 +386,7 @@ export function SearchPerformanceView({
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [isConnecting, setIsConnecting] = useState<boolean>(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
 
   // URL Inspection state
   const [inspectUrlInput, setInspectUrlInput] = useState<string>('');
@@ -495,16 +496,22 @@ export function SearchPerformanceView({
   const handleSync = async () => {
     if (!website) return;
     setIsSyncing(true);
+    setSyncError(null);
     try {
       const res = await api.post<any>(`/websites/${website.id}/search-console/sync`);
       if (res.success) {
         toast.success(`Search Console sync completed. Ingested ${res.data?.rows_synced || 0} performance records.`);
         loadData();
       } else {
-        toast.error(res.error?.message || 'Sync failed.');
+        const msg = res.error?.message || 'Sync failed.';
+        setSyncError(msg);
+        toast.error(msg);
+        loadData();
       }
     } catch {
-      toast.error('Sync failed due to a network error.');
+      const msg = 'Sync failed due to a network error.';
+      setSyncError(msg);
+      toast.error(msg);
     } finally {
       setIsSyncing(false);
     }
@@ -673,6 +680,44 @@ export function SearchPerformanceView({
       {/* Connected Performance Dashboard */}
       {status?.connected && (
         <>
+          {/* Scope / Permission Missing Self-Healing Banner */}
+          {(status.scope_missing ||
+            (syncError && syncError.toLowerCase().includes('permission')) ||
+            (syncError && syncError.toLowerCase().includes('insufficient')) ||
+            (status.last_error &&
+              (status.last_error.toLowerCase().includes('insufficient') ||
+                status.last_error.toLowerCase().includes('permission')))) && (
+            <div className="p-4 bg-amber-950/35 border border-amber-500/40 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <div className="text-xs font-bold text-amber-200">
+                    Google Search Console Permission Required
+                  </div>
+                  <p className="text-xs text-amber-100/80 leading-relaxed">
+                    {syncError ||
+                      status.last_error ||
+                      'Your Google connection is missing Search Console read permission.'}{' '}
+                    Click <strong className="text-white">Reconnect Search Console</strong> and make sure to{' '}
+                    <strong className="text-white">
+                      check the box &ldquo;View Search Console data for your verified sites&rdquo;
+                    </strong>{' '}
+                    on Google&apos;s permission screen.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleConnect}
+                disabled={isConnecting}
+                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-bold shadow transition whitespace-nowrap flex items-center gap-1.5 shrink-0 disabled:opacity-50"
+              >
+                <Link2 className="w-3.5 h-3.5" />
+                <span>{isConnecting ? 'Redirecting...' : 'Reconnect Search Console'}</span>
+              </button>
+            </div>
+          )}
+
           {/* Health & Property Bar */}
           <div className="p-3 bg-zinc-900/60 border border-zinc-800 rounded-xl flex flex-wrap items-center justify-between text-xs text-zinc-400 gap-3">
             <div className="flex items-center gap-2">

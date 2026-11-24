@@ -61,9 +61,8 @@ class GoogleAnalyticsService
             'client_id' => $this->clientId,
             'redirect_uri' => $this->redirectUri,
             'response_type' => 'code',
-            'scope' => 'https://www.googleapis.com/auth/analytics.readonly https://www.googleapis.com/auth/webmasters.readonly',
+            'scope' => 'https://www.googleapis.com/auth/analytics.readonly',
             'access_type' => 'offline',
-            'include_granted_scopes' => 'true',
             'prompt' => 'consent select_account',
             'state' => $state,
         ]);
