@@ -48,12 +48,15 @@ return Application::configure(basePath: dirname(__DIR__))
 
         $exceptions->render(function (ValidationException $e, Request $request) {
             if ($request->is('api/*')) {
+                $errors = $e->errors();
+                $firstMessage = collect($errors)->flatten()->first() ?: 'The given data was invalid.';
+
                 return response()->json([
                     'success' => false,
                     'error' => [
                         'code' => 'VALIDATION_FAILED',
-                        'message' => 'The given data was invalid.',
-                        'details' => $e->errors(),
+                        'message' => $firstMessage,
+                        'details' => $errors,
                     ],
                     'timestamp' => now()->toIso8601String(),
                 ], 422);

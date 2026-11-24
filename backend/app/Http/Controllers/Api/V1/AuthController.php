@@ -19,27 +19,35 @@ class AuthController extends Controller
     use ApiResponseTrait;
 
     /**
-     * Register a new user.
-     * Public self-registration is disabled once an initial owner exists,
-     * unless explicitly permitted via ALLOW_PUBLIC_REGISTRATION=true.
+     * Register a new user and provision their own isolated multi-tenant workspace.
+     * Can be locked for internal-only deployments via ALLOW_PUBLIC_REGISTRATION=false.
      */
     public function register(Request $request): JsonResponse
     {
         $existingUsersCount = User::count();
-        $isPublicRegistrationAllowed = config('app.allow_public_registration', false);
+        $isPublicRegistrationAllowed = (bool) config('app.allow_public_registration', true);
 
-        // Disallow arbitrary self-registration if users exist and flag is false
+        // Disallow self-registration only if users already exist AND operator explicitly disabled it
         if ($existingUsersCount > 0 && !$isPublicRegistrationAllowed) {
             return $this->error(
-                'Public registration is currently disabled for this internal deployment. Please contact an organization administrator for an invitation.',
+                'Public registration is currently disabled for this deployment. Please contact an organization administrator for an invitation.',
                 'REGISTRATION_DISABLED',
                 null,
                 403
             );
         }
 
+        // Normalize email & optional workspace name before validation
+        $request->merge([
+            'name' => trim((string) $request->input('name', '')),
+            'email' => strtolower(trim((string) $request->input('email', ''))),
+            'organization_name' => $request->filled('organization_name')
+                ? trim((string) $request->input('organization_name'))
+                : null,
+        ]);
+
         $validated = $request->validate([
-            'name' => ['required', 'string', 'max:255'],
+            'name' => ['required', 'string', 'min:2', 'max:255'],
             'email' => ['required', 'string', 'email', 'max:255', 'unique:users,email'],
             'password' => ['required', 'string', Password::min(8)->letters()->numbers(), 'confirmed'],
             'organization_name' => ['nullable', 'string', 'max:255'],
@@ -52,14 +60,21 @@ class AuthController extends Controller
                 'password' => Hash::make($validated['password']),
             ]);
 
-            // If initial deployment, set up default organization
-            $orgName = $validated['organization_name'] ?? ($existingUsersCount === 0 ? 'Techboloy Agency' : $validated['name'] . "'s Org");
-            $orgSlug = Str::slug($orgName) . '-' . Str::random(5);
+            // Create a dedicated isolated organization/workspace for every registered user
+            $orgName = !empty($validated['organization_name'])
+                ? $validated['organization_name']
+                : ($existingUsersCount === 0 ? 'Techboloy Agency' : $validated['name'] . "'s Workspace");
+
+            $baseSlug = Str::slug($orgName) ?: 'workspace';
+            $orgSlug = $baseSlug . '-' . strtolower(Str::random(6));
+            $billingPlan = $existingUsersCount === 0
+                ? 'agency_internal'
+                : (string) config('saas.default_signup_plan', 'agency_pro');
 
             $organization = Organization::create([
                 'name' => $orgName,
                 'slug' => $orgSlug,
-                'billing_plan' => 'agency_internal',
+                'billing_plan' => $billingPlan,
             ]);
 
             OrganizationMember::create([
@@ -74,11 +89,18 @@ class AuthController extends Controller
                 'user.registered',
                 $user,
                 null,
-                ['email' => $user->email, 'role' => 'owner'],
+                ['email' => $user->email, 'role' => OrganizationMember::ROLE_OWNER, 'plan' => $billingPlan],
                 $request
             );
 
             $token = $user->createToken('auth-token')->plainTextToken;
+
+            $orgPayload = [
+                'id' => $organization->id,
+                'name' => $organization->name,
+                'slug' => $organization->slug,
+                'role' => OrganizationMember::ROLE_OWNER,
+            ];
 
             return $this->success([
                 'user' => [
@@ -87,12 +109,8 @@ class AuthController extends Controller
                     'email' => $user->email,
                 ],
                 'token' => $token,
-                'current_organization' => [
-                    'id' => $organization->id,
-                    'name' => $organization->name,
-                    'slug' => $organization->slug,
-                    'role' => OrganizationMember::ROLE_OWNER,
-                ],
+                'organizations' => [$orgPayload],
+                'current_organization' => $orgPayload,
             ], null, 201);
         });
     }
@@ -102,12 +120,16 @@ class AuthController extends Controller
      */
     public function login(Request $request): JsonResponse
     {
+        $request->merge([
+            'email' => strtolower(trim((string) $request->input('email', ''))),
+        ]);
+
         $validated = $request->validate([
             'email' => ['required', 'string', 'email'],
             'password' => ['required', 'string'],
         ]);
 
-        $user = User::where('email', $validated['email'])->first();
+        $user = User::whereRaw('LOWER(email) = ?', [$validated['email']])->first();
 
         if (!$user || !Hash::check($validated['password'], $user->password)) {
             return $this->error(

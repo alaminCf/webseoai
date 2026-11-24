@@ -42,16 +42,83 @@ class AuthTest extends TestCase
         $this->assertDatabaseHas('organization_members', ['role' => 'owner']);
     }
 
+    public function test_public_user_can_register_isolated_workspace_when_other_users_exist(): void
+    {
+        // Existing owner and organization
+        $existingUser = User::create([
+            'name' => 'Existing Owner',
+            'email' => 'owner@techboloy.com',
+            'password' => bcrypt('Password123!'),
+        ]);
+        $existingOrg = Organization::create([
+            'name' => 'Techboloy Agency',
+            'slug' => 'techboloy-agency',
+            'billing_plan' => 'agency_internal',
+        ]);
+        OrganizationMember::create([
+            'organization_id' => $existingOrg->id,
+            'user_id' => $existingUser->id,
+            'role' => OrganizationMember::ROLE_OWNER,
+        ]);
+
+        // Another user registers publicly
+        $response = $this->postJson('/api/v1/auth/register', [
+            'name' => 'Sarah Khan',
+            'email' => '  Sarah@GrowthStudio.com ',
+            'password' => 'GrowthPass123',
+            'password_confirmation' => 'GrowthPass123',
+            'organization_name' => 'Growth Studio',
+        ]);
+
+        $response->assertStatus(201)
+            ->assertJson([
+                'success' => true,
+                'data' => [
+                    'user' => [
+                        'name' => 'Sarah Khan',
+                        'email' => 'sarah@growthstudio.com',
+                    ],
+                    'current_organization' => [
+                        'name' => 'Growth Studio',
+                        'role' => 'owner',
+                    ],
+                ],
+            ]);
+
+        $newOrgId = $response->json('data.current_organization.id');
+        $newToken = $response->json('data.token');
+        $this->assertNotEquals($existingOrg->id, $newOrgId);
+        $this->assertCount(1, $response->json('data.organizations'));
+
+        // Verify strict multi-tenant isolation: new user cannot access existing org
+        $forbidden = $this->withHeader('Authorization', 'Bearer ' . $newToken)
+            ->withHeader('X-Organization-Id', (string) $existingOrg->id)
+            ->getJson('/api/v1/websites');
+        $forbidden->assertStatus(403);
+
+        // Verify case-insensitive duplicate email is rejected cleanly
+        $dup = $this->postJson('/api/v1/auth/register', [
+            'name' => 'Duplicate Sarah',
+            'email' => 'SARAH@growthstudio.com',
+            'password' => 'GrowthPass123',
+            'password_confirmation' => 'GrowthPass123',
+        ]);
+        $dup->assertStatus(422)
+            ->assertJsonPath('error.code', 'VALIDATION_FAILED');
+    }
+
     public function test_subsequent_public_registration_is_blocked_when_disabled(): void
     {
-        // First user registers
+        config(['app.allow_public_registration' => false]);
+
+        // First user exists
         User::create([
             'name' => 'Existing User',
             'email' => 'existing@techboloy.com',
             'password' => bcrypt('Password123!'),
         ]);
 
-        // Second registration attempt should be rejected with 403
+        // Second registration attempt should be rejected with 403 when explicitly disabled
         $response = $this->postJson('/api/v1/auth/register', [
             'name' => 'Intruder',
             'email' => 'stranger@example.com',

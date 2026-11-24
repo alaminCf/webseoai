@@ -6,7 +6,8 @@ return [
     | SaaS Launch & Public Registration
     |--------------------------------------------------------------------------
     */
-    'public_registration_enabled' => env('SAAS_PUBLIC_REGISTRATION_ENABLED', false),
+    'public_registration_enabled' => filter_var(env('SAAS_PUBLIC_REGISTRATION_ENABLED', true), FILTER_VALIDATE_BOOL),
+    'default_signup_plan' => env('DEFAULT_SIGNUP_PLAN', 'agency_pro'),
 
     /*
     |--------------------------------------------------------------------------

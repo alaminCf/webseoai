@@ -5,16 +5,46 @@ import { User, Organization } from '@/types';
 import { api } from '@/lib/api';
 import { useToast } from './ToastContext';
 
+interface AuthActionResult {
+  success: boolean;
+  error?: string;
+}
+
 interface AuthContextType {
   user: User | null;
   organizations: Organization[];
   currentOrganization: Organization | null;
   isLoading: boolean;
-  login: (email: string, password: string) => Promise<boolean>;
-  register: (name: string, email: string, password: string, organizationName?: string) => Promise<boolean>;
+  login: (email: string, password: string) => Promise<AuthActionResult>;
+  register: (
+    name: string,
+    email: string,
+    password: string,
+    passwordConfirmation: string,
+    organizationName?: string
+  ) => Promise<AuthActionResult>;
   logout: () => Promise<void>;
   switchOrganization: (orgId: number) => void;
   refreshOrganizations: () => Promise<void>;
+}
+
+function extractApiError(
+  error?: { message?: string; details?: Record<string, string[] | string> | unknown } | null,
+  fallback = 'Request failed. Please try again.'
+): string {
+  if (!error) return fallback;
+  if (error.details && typeof error.details === 'object' && !Array.isArray(error.details)) {
+    const entries = Object.values(error.details as Record<string, unknown>);
+    for (const val of entries) {
+      if (Array.isArray(val) && typeof val[0] === 'string' && val[0].trim()) {
+        return val[0];
+      }
+      if (typeof val === 'string' && val.trim()) {
+        return val;
+      }
+    }
+  }
+  return error.message || fallback;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -69,7 +99,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     fetchUserProfile();
   }, [fetchUserProfile]);
 
-  const login = async (email: string, password: string): Promise<boolean> => {
+  const login = async (email: string, password: string): Promise<AuthActionResult> => {
     setIsLoading(true);
     try {
       const res = await api.post<{
@@ -77,7 +107,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         token: string;
         organizations: Organization[];
         current_organization: Organization;
-      }>('/auth/login', { email, password });
+      }>('/auth/login', { email: email.trim().toLowerCase(), password });
 
       if (res.success && res.data) {
         api.setToken(res.data.token);
@@ -91,10 +121,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
 
         toast.success(`Welcome back, ${res.data.user.name}!`);
-        return true;
+        return { success: true };
       } else {
-        toast.error(res.error?.message || 'Login failed. Please check your credentials.');
-        return false;
+        const msg = extractApiError(res.error, 'Login failed. Please check your credentials.');
+        toast.error(msg);
+        return { success: false, error: msg };
       }
     } finally {
       setIsLoading(false);
@@ -105,35 +136,39 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     name: string,
     email: string,
     password: string,
+    passwordConfirmation: string,
     organizationName?: string
-  ): Promise<boolean> => {
+  ): Promise<AuthActionResult> => {
     setIsLoading(true);
     try {
       const res = await api.post<{
         user: User;
         token: string;
+        organizations?: Organization[];
         current_organization: Organization;
       }>('/auth/register', {
-        name,
-        email,
+        name: name.trim(),
+        email: email.trim().toLowerCase(),
         password,
-        password_confirmation: password,
-        organization_name: organizationName,
+        password_confirmation: passwordConfirmation,
+        organization_name: organizationName?.trim() || undefined,
       });
 
       if (res.success && res.data) {
         api.setToken(res.data.token);
         setUser(res.data.user);
         const org = res.data.current_organization;
-        setOrganizations([org]);
+        const orgs = res.data.organizations && res.data.organizations.length > 0 ? res.data.organizations : [org];
+        setOrganizations(orgs);
         setCurrentOrganization(org);
         api.setOrganizationId(org.id);
 
-        toast.success('Account successfully registered!');
-        return true;
+        toast.success(`Welcome to Web SEO AI, ${res.data.user.name}! Your workspace "${org.name}" is ready.`);
+        return { success: true };
       } else {
-        toast.error(res.error?.message || 'Registration failed.');
-        return false;
+        const msg = extractApiError(res.error, 'Registration failed. Please review your details.');
+        toast.error(msg);
+        return { success: false, error: msg };
       }
     } finally {
       setIsLoading(false);

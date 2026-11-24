@@ -43,6 +43,18 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Public Self-Serve Registration
+    |--------------------------------------------------------------------------
+    |
+    | Allows new users to register their own isolated multi-tenant workspace.
+    | Set ALLOW_PUBLIC_REGISTRATION=false to lock an internal-only deployment.
+    |
+    */
+
+    'allow_public_registration' => filter_var(env('ALLOW_PUBLIC_REGISTRATION', true), FILTER_VALIDATE_BOOL),
+
+    /*
+    |--------------------------------------------------------------------------
     | Application URL
     |--------------------------------------------------------------------------
     |
