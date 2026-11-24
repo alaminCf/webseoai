@@ -397,7 +397,7 @@ export async function downloadExecutivePdfReport(
   let preparedStartY = 36.5;
 
   if (loadedLogo) {
-    const { w, h } = fitLogoBox(loadedLogo, 34, 12);
+    const { w, h } = fitLogoBox(loadedLogo, 38, 12.5);
     // Clean white rounded container behind logo so both dark and transparent logos look crisp
     const padX = 2.5;
     const padY = 1.6;
@@ -405,16 +405,11 @@ export async function downloadExecutivePdfReport(
     doc.roundedRect(margin, 6.5, w + padX * 2, h + padY * 2, 2, 2, 'F');
     doc.addImage(loadedLogo.dataUrl, loadedLogo.format, margin + padX, 6.5 + padY, w, h, undefined, 'FAST');
 
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9.5);
-    doc.setTextColor(...brandRgb);
-    doc.text(agencyName.toUpperCase(), margin + w + padX * 2 + 4, 6.5 + (h + padY * 2) / 2 + 1.2);
-
     titleStartY = 28;
     metaStartY = 36;
     preparedStartY = 42.5;
   } else {
-    // Agency Pill
+    // Agency Pill (shown only when no logo is uploaded)
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9);
     doc.setTextColor(...brandRgb);
@@ -1086,7 +1081,7 @@ export async function downloadExecutivePdfReport(
 
       let headerTextX = margin;
       if (loadedLogo) {
-        const mini = fitLogoBox(loadedLogo, 18, 7.5);
+        const mini = fitLogoBox(loadedLogo, 20, 7.5);
         doc.addImage(loadedLogo.dataUrl, loadedLogo.format, margin, (12 - mini.h) / 2, mini.w, mini.h, undefined, 'FAST');
         headerTextX = margin + mini.w + 3;
       }
@@ -1094,7 +1089,7 @@ export async function downloadExecutivePdfReport(
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(7.5);
       doc.setTextColor(...darkSlate);
-      doc.text(`${agencyName}  •  ${bundle.website.domain}`, headerTextX, 7.5);
+      doc.text(loadedLogo ? bundle.website.domain : `${agencyName}  •  ${bundle.website.domain}`, headerTextX, 7.5);
       doc.setFont('helvetica', 'normal');
       doc.setTextColor(...mutedText);
       doc.text(`${bundle.range_label}  |  ${bundle.report_id}`, pageWidth - margin, 7.5, { align: 'right' });
@@ -1182,19 +1177,15 @@ export async function downloadLiveSerpPdf(
   doc.rect(0, bannerH, pageWidth, 2, 'F');
 
   if (loadedLogo) {
-    const box = fitLogoBox(loadedLogo, 30, 10);
+    const box = fitLogoBox(loadedLogo, 34, 10.5);
     doc.setFillColor(255, 255, 255);
     doc.roundedRect(margin, 5.5, box.w + 4, box.h + 2.8, 1.8, 1.8, 'F');
     doc.addImage(loadedLogo.dataUrl, loadedLogo.format, margin + 2, 5.5 + 1.4, box.w, box.h, undefined, 'FAST');
 
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    doc.setTextColor(...brandRgb);
-    doc.text(
-      `${(branding?.brand_name || 'WEB SEO AI').toUpperCase()}  •  LIVE GOOGLE SERP REPORT`,
-      margin + box.w + 8,
-      5.5 + (box.h + 2.8) / 2 + 1
-    );
+    doc.setFontSize(8.5);
+    doc.setTextColor(148, 163, 184);
+    doc.text('LIVE GOOGLE SERP REPORT', pageWidth - margin, 11.5, { align: 'right' });
   } else {
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9);
