@@ -81,7 +81,7 @@ interface RankCheckerContextData {
     name: string;
     label: string;
     configured: boolean;
-    source?: 'server_env' | 'workspace_key' | 'unconfigured';
+    source?: 'server_env' | 'workspace_key' | 'platform_shared' | 'unconfigured';
     key_hint?: string | null;
     has_workspace_key?: boolean;
   };
@@ -563,20 +563,30 @@ export function RankCheckerView({
                 {website.domain}
               </span>
               {context?.provider && (
-                <button
-                  type="button"
-                  onClick={() => setShowKeySetup((v) => !v)}
-                  className={`inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-0.5 rounded-md border transition ${
-                    context.provider.configured
-                      ? 'bg-sky-500/10 text-sky-400 border-sky-500/30 hover:bg-sky-500/20'
-                      : 'bg-amber-500/15 text-amber-300 border-amber-500/40 hover:bg-amber-500/25'
-                  }`}
-                >
-                  <KeyRound className="w-3 h-3" />
-                  {context.provider.configured
-                    ? `Live SERP: ${context.provider.label}${context.provider.key_hint ? ` (${context.provider.key_hint})` : ''}`
-                    : 'Connect Live Google Search Key'}
-                </button>
+                context.provider.source === 'platform_shared' || context.provider.source === 'server_env' ? (
+                  <span
+                    className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-0.5 rounded-md border bg-emerald-500/10 text-emerald-400 border-emerald-500/30"
+                    title="Live Google Search Engine is built-in and active automatically — no API key setup needed."
+                  >
+                    <CheckCircle2 className="w-3 h-3" />
+                    Built-In Live Google Engine Active
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setShowKeySetup((v) => !v)}
+                    className={`inline-flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-0.5 rounded-md border transition ${
+                      context.provider.configured
+                        ? 'bg-sky-500/10 text-sky-400 border-sky-500/30 hover:bg-sky-500/20'
+                        : 'bg-amber-500/15 text-amber-300 border-amber-500/40 hover:bg-amber-500/25'
+                    }`}
+                  >
+                    <KeyRound className="w-3 h-3" />
+                    {context.provider.configured
+                      ? `Live SERP: ${context.provider.label}${context.provider.key_hint ? ` (${context.provider.key_hint})` : ''}`
+                      : 'Connect Live Google Search Key'}
+                  </button>
+                )
               )}
             </div>
             <h1 className="text-lg sm:text-xl font-bold text-zinc-100">

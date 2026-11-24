@@ -82,6 +82,56 @@ class SerperProvider implements CompetitorProviderInterface
         return is_string($creds) ? trim($creds) : '';
     }
 
+    /**
+     * Resolve the platform-wide shared Serper.dev integration configured by the platform owner
+     * (any connected Serper integration in an `agency_internal` organization or explicitly
+     * marked `platform_shared = true`), so every new user gets Live Google Search automatically
+     * after login without having to set up their own API keys.
+     */
+    public static function resolvePlatformSharedIntegration(): ?WebsiteIntegration
+    {
+        try {
+            $internalOrgIds = \App\Models\Organization::where('billing_plan', 'agency_internal')->pluck('id');
+
+            $query = WebsiteIntegration::where('provider', WebsiteIntegration::PROVIDER_SERPER)
+                ->where('status', WebsiteIntegration::STATUS_CONNECTED)
+                ->orderByDesc('updated_at');
+
+            if ($internalOrgIds->isNotEmpty()) {
+                $internalMatch = (clone $query)->whereIn('organization_id', $internalOrgIds)->first();
+                if ($internalMatch) {
+                    return $internalMatch;
+                }
+            }
+
+            // Fallback: check any integration explicitly tagged platform_shared
+            foreach ($query->limit(10)->get() as $candidate) {
+                if (!empty($candidate->metadata['platform_shared'])) {
+                    return $candidate;
+                }
+            }
+
+            return null;
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    public static function resolvePlatformSharedApiKey(): string
+    {
+        $integration = self::resolvePlatformSharedIntegration();
+        if (!$integration) {
+            return '';
+        }
+
+        $creds = $integration->getDecryptedCredentials();
+        if (is_array($creds)) {
+            return trim((string) ($creds['api_key'] ?? ''));
+        }
+
+        return is_string($creds) ? trim($creds) : '';
+    }
+
     public function resolveEffectiveApiKey(?int $organizationId = null): string
     {
         if ($this->runtimeApiKey !== null && $this->runtimeApiKey !== '') {
@@ -93,7 +143,12 @@ class SerperProvider implements CompetitorProviderInterface
             return $envKey;
         }
 
-        return self::resolveWorkspaceApiKey($organizationId);
+        $workspaceKey = self::resolveWorkspaceApiKey($organizationId);
+        if ($workspaceKey !== '') {
+            return $workspaceKey;
+        }
+
+        return self::resolvePlatformSharedApiKey();
     }
 
     public function getName(): string

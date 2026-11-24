@@ -93,6 +93,7 @@ class RankCheckerService
         $serpProvider = $this->providerManager->resolveForCapability('serp', $website->organization_id);
         $envSerperActive = SerperProvider::resolveEnvApiKey() !== '';
         $workspaceSerper = SerperProvider::resolveWorkspaceIntegration($website->organization_id);
+        $platformSerperActive = !$envSerperActive && !$workspaceSerper && SerperProvider::resolvePlatformSharedApiKey() !== '';
 
         $providerSource = 'unconfigured';
         $keyHint = null;
@@ -102,6 +103,10 @@ class RankCheckerService
             } elseif ($workspaceSerper) {
                 $providerSource = 'workspace_key';
                 $keyHint = $workspaceSerper->metadata['key_hint'] ?? null;
+            } elseif ($platformSerperActive) {
+                $providerSource = 'platform_shared';
+                // Never expose the platform owner's key hint to other tenants
+                $keyHint = null;
             }
         } elseif ($serpProvider->getName() !== 'first_party_crawl') {
             $providerSource = 'server_env';
@@ -146,6 +151,8 @@ class RankCheckerService
 
         $hint = strlen($cleanKey) >= 4 ? '••••' . substr($cleanKey, -4) : '••••';
 
+        $isPlatformOwnerOrg = $website->organization?->billing_plan === 'agency_internal';
+
         WebsiteIntegration::updateOrCreate(
             [
                 'website_id' => $website->id,
@@ -160,6 +167,7 @@ class RankCheckerService
                 'metadata' => [
                     'key_hint' => $hint,
                     'provider_label' => 'Serper.dev (Google Search API)',
+                    'platform_shared' => $isPlatformOwnerOrg,
                     'verified_at' => now()->toIso8601String(),
                 ],
             ]

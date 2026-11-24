@@ -335,4 +335,105 @@ class RankCheckerTest extends TestCase
         $this->assertTrue($res->json('data.pages_summary.4.has_target'));
         Http::assertSentCount(5);
     }
+
+    public function test_new_user_workspace_automatically_inherits_platform_shared_serper_engine(): void
+    {
+        config([
+            'competitors.providers.dataforseo.login' => '',
+            'competitors.providers.dataforseo.password' => '',
+            'competitors.providers.serpapi.api_key' => '',
+            'competitors.providers.serper.api_key' => '',
+        ]);
+
+        // 1. Platform owner (agency_internal) already has a verified Serper key connected
+        $owner = User::factory()->create();
+        $platformOrg = Organization::create([
+            'name' => 'Techboloy Agency',
+            'slug' => 'techboloy-platform',
+            'billing_plan' => 'agency_internal',
+        ]);
+        OrganizationMember::create([
+            'organization_id' => $platformOrg->id,
+            'user_id' => $owner->id,
+            'role' => OrganizationMember::ROLE_OWNER,
+        ]);
+        $ownerSite = Website::create([
+            'organization_id' => $platformOrg->id,
+            'name' => 'Platform Site',
+            'domain' => 'techboloy.com',
+            'target_url' => 'https://techboloy.com',
+            'platform' => Website::PLATFORM_CUSTOM,
+            'target_country' => 'US',
+            'preferred_language' => 'en',
+        ]);
+
+        \App\Models\WebsiteIntegration::create([
+            'organization_id' => $platformOrg->id,
+            'website_id' => $ownerSite->id,
+            'provider' => \App\Models\WebsiteIntegration::PROVIDER_SERPER,
+            'status' => \App\Models\WebsiteIntegration::STATUS_CONNECTED,
+            'encrypted_credentials' => ['api_key' => 'platform_shared_serper_secret_999'],
+            'metadata' => ['key_hint' => '••••_999', 'platform_shared' => true],
+        ]);
+
+        // 2. Brand-new public user signs up with their own isolated workspace (ZERO API keys configured!)
+        $newUser = User::factory()->create();
+        $newOrg = Organization::create([
+            'name' => 'CareMate Workspace',
+            'slug' => 'caremate-ws',
+            'billing_plan' => 'agency_pro',
+        ]);
+        OrganizationMember::create([
+            'organization_id' => $newOrg->id,
+            'user_id' => $newUser->id,
+            'role' => OrganizationMember::ROLE_OWNER,
+        ]);
+        $newSite = Website::create([
+            'organization_id' => $newOrg->id,
+            'name' => 'CareMate BD',
+            'domain' => 'carematebd.com',
+            'target_url' => 'https://carematebd.com',
+            'platform' => Website::PLATFORM_WORDPRESS,
+            'target_country' => 'BD',
+            'preferred_language' => 'en',
+        ]);
+
+        // 3. New user's Rank Checker context immediately shows built-in engine active with zero key leak!
+        $ctxRes = $this->actingAs($newUser)
+            ->withHeaders(['X-Organization-Id' => (string) $newOrg->id])
+            ->getJson("/api/v1/websites/{$newSite->id}/rank-checker/context");
+
+        $ctxRes->assertOk()
+            ->assertJsonPath('data.provider.configured', true)
+            ->assertJsonPath('data.provider.source', 'platform_shared')
+            ->assertJsonPath('data.provider.key_hint', null)
+            ->assertJsonPath('data.provider.has_workspace_key', false);
+
+        // 4. New user immediately runs a live rank check without pasting any API key
+        Http::fake([
+            'https://google.serper.dev/search' => function ($req) {
+                $this->assertEquals('platform_shared_serper_secret_999', $req->header('X-API-KEY')[0] ?? '');
+                return Http::response([
+                    'organic' => [
+                        ['position' => 1, 'link' => 'https://rival.com.bd/', 'title' => 'Rival', 'snippet' => 'Rival'],
+                        ['position' => 2, 'link' => 'https://carematebd.com/home-care', 'title' => 'CareMate BD', 'snippet' => 'Home care in Dhaka'],
+                    ],
+                ], 200);
+            },
+        ]);
+
+        $checkRes = $this->actingAs($newUser)
+            ->withHeaders(['X-Organization-Id' => (string) $newOrg->id])
+            ->postJson("/api/v1/websites/{$newSite->id}/rank-checker/check", [
+                'keyword' => 'home care services in dhaka',
+                'country' => 'BD',
+                'device' => 'desktop',
+                'depth' => 20,
+            ]);
+
+        $checkRes->assertStatus(201)
+            ->assertJsonPath('data.target_ranking.found', true)
+            ->assertJsonPath('data.target_ranking.position', 2)
+            ->assertJsonPath('data.target_ranking.google_page', 1);
+    }
 }
