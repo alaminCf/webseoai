@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\V1\AdminController;
 use App\Http\Controllers\Api\V1\AiRecommendationController;
 use App\Http\Controllers\Api\V1\AuditController;
 use App\Http\Controllers\Api\V1\AuditLogController;
@@ -92,6 +93,34 @@ Route::prefix('v1')->group(function () {
         // Organizations (Global user list & creation)
         Route::get('/organizations', [OrganizationController::class, 'index']);
         Route::post('/organizations', [OrganizationController::class, 'store']);
+
+        // Super Admin Control Panel (Protected by super.admin middleware)
+        Route::prefix('admin')->middleware('super.admin')->group(function () {
+            Route::get('/overview', [AdminController::class, 'overview']);
+
+            // Multi-Key SERP API Pool & Auto-Failover
+            Route::get('/serp-keys', [AdminController::class, 'listSerpKeys']);
+            Route::post('/serp-keys', [AdminController::class, 'addSerpKey']);
+            Route::post('/serp-keys/import-legacy', [AdminController::class, 'importLegacySerpKey']);
+            Route::patch('/serp-keys/{key}', [AdminController::class, 'updateSerpKey']);
+            Route::delete('/serp-keys/{key}', [AdminController::class, 'deleteSerpKey']);
+
+            // Platform Settings (Quotas, Smart Cache TTL, Default Depth, Registration)
+            Route::get('/settings', [AdminController::class, 'getSettings']);
+            Route::put('/settings', [AdminController::class, 'updateSettings']);
+            Route::post('/cache/flush', [AdminController::class, 'flushCache']);
+
+            // Users, Workspaces & Websites Management
+            Route::get('/users', [AdminController::class, 'listUsers']);
+            Route::patch('/users/{user}', [AdminController::class, 'updateUser']);
+            Route::delete('/users/{user}', [AdminController::class, 'deleteUser']);
+
+            Route::get('/organizations', [AdminController::class, 'listOrganizations']);
+            Route::patch('/organizations/{organization}', [AdminController::class, 'updateOrganization']);
+            Route::delete('/organizations/{organization}', [AdminController::class, 'deleteOrganization']);
+
+            Route::get('/websites', [AdminController::class, 'listWebsites']);
+        });
 
         // Organization-Scoped Domain Endpoints
         Route::middleware('org.context')->group(function () {

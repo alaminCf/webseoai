@@ -57,9 +57,7 @@ class CompetitorProviderManager
             }
             if ($provider instanceof SerperProvider) {
                 $provider->setRuntimeApiKey(null);
-                $resolvedKey = $provider->resolveEffectiveApiKey($effectiveOrgId);
-                if ($resolvedKey !== '') {
-                    $provider->setRuntimeApiKey($resolvedKey);
+                if ($provider->isConfigured($effectiveOrgId)) {
                     return $provider;
                 }
                 continue;

@@ -32,6 +32,7 @@ import { ReportsCenterView } from '@/components/ReportsCenterView';
 import { UnifiedPerformanceView } from '@/components/UnifiedPerformanceView';
 import { AutopilotView } from '@/components/AutopilotView';
 import { UnifiedSettingsView } from '@/components/UnifiedSettingsView';
+import { AdminPanelView } from '@/components/AdminPanelView';
 import { TeamView } from '@/components/TeamView';
 import { OnboardingWizardModal } from '@/components/OnboardingWizardModal';
 import { AddWebsiteModal } from '@/components/AddWebsiteModal';
@@ -63,7 +64,7 @@ export default function DashboardPage() {
     const reason = params.get('reason');
     const websiteIdParam = params.get('website_id');
 
-    const validTabs = ['overview', 'websites', 'action_plan', 'audits', 'competitors', 'content', 'rank_checker', 'live_traffic', 'performance', 'reports', 'autopilot', 'team', 'settings'];
+    const validTabs = ['overview', 'websites', 'action_plan', 'audits', 'competitors', 'content', 'rank_checker', 'live_traffic', 'performance', 'reports', 'autopilot', 'team', 'settings', 'admin'];
     if (tab && validTabs.includes(tab)) {
       setActiveTab(tab);
     }
@@ -372,6 +373,11 @@ export default function DashboardPage() {
             <UnifiedSettingsView
               selectedWebsite={selectedWebsite}
             />
+          )}
+
+          {/* SECTION 10: PLATFORM SUPER ADMIN CONTROL PANEL */}
+          {activeTab === 'admin' && (
+            <AdminPanelView />
           )}
         </main>
       </div>

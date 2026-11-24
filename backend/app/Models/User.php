@@ -28,6 +28,8 @@ class User extends Authenticatable
         'phone',
         'bio',
         'auth_provider',
+        'is_super_admin',
+        'status',
         'email_verified_at',
         'password',
     ];
@@ -52,6 +54,7 @@ class User extends Authenticatable
         return [
             'email_verified_at' => 'datetime',
             'password' => 'hashed',
+            'is_super_admin' => 'boolean',
         ];
     }
 
@@ -83,6 +86,26 @@ class User extends Authenticatable
         return $membership?->role;
     }
 
+    public function isSuspended(): bool
+    {
+        return ($this->status ?? 'active') === 'suspended';
+    }
+
+    /**
+     * Platform Super Admin: explicitly flagged OR owner/admin of an agency_internal organization.
+     */
+    public function isSuperAdmin(): bool
+    {
+        if ((bool) $this->is_super_admin) {
+            return true;
+        }
+
+        return $this->memberships()
+            ->whereIn('role', [OrganizationMember::ROLE_OWNER, OrganizationMember::ROLE_ADMIN])
+            ->whereHas('organization', fn ($q) => $q->where('billing_plan', 'agency_internal'))
+            ->exists();
+    }
+
     /**
      * Standardized API profile payload for auth and profile endpoints.
      */
@@ -98,6 +121,8 @@ class User extends Authenticatable
             'bio' => $this->bio,
             'auth_provider' => $this->auth_provider ?: ($this->google_id ? 'google' : 'email'),
             'google_connected' => !empty($this->google_id),
+            'is_super_admin' => $this->isSuperAdmin(),
+            'status' => $this->status ?? 'active',
             'created_at' => $this->created_at?->toIso8601String(),
         ];
     }

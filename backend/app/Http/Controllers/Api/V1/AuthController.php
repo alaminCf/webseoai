@@ -28,7 +28,8 @@ class AuthController extends Controller
     public function register(Request $request): JsonResponse
     {
         $existingUsersCount = User::count();
-        $isPublicRegistrationAllowed = (bool) config('app.allow_public_registration', true);
+        $regSettings = \App\Models\PlatformSetting::getValue('registration');
+        $isPublicRegistrationAllowed = (bool) ($regSettings['allow_public_registration'] ?? config('app.allow_public_registration', true));
 
         // Disallow self-registration only if users already exist AND operator explicitly disabled it
         if ($existingUsersCount > 0 && !$isPublicRegistrationAllowed) {
@@ -56,11 +57,13 @@ class AuthController extends Controller
             'organization_name' => ['nullable', 'string', 'max:255'],
         ]);
 
-        return DB::transaction(function () use ($validated, $existingUsersCount, $request) {
+        return DB::transaction(function () use ($validated, $existingUsersCount, $regSettings, $request) {
             $user = User::create([
                 'name' => $validated['name'],
                 'email' => $validated['email'],
                 'password' => Hash::make($validated['password']),
+                'is_super_admin' => $existingUsersCount === 0,
+                'status' => 'active',
             ]);
 
             // Create a dedicated isolated organization/workspace for every registered user
@@ -72,7 +75,7 @@ class AuthController extends Controller
             $orgSlug = $baseSlug . '-' . strtolower(Str::random(6));
             $billingPlan = $existingUsersCount === 0
                 ? 'agency_internal'
-                : (string) config('saas.default_signup_plan', 'agency_pro');
+                : (string) ($regSettings['default_signup_plan'] ?? config('saas.default_signup_plan', 'agency_pro'));
 
             $organization = Organization::create([
                 'name' => $orgName,
@@ -136,6 +139,15 @@ class AuthController extends Controller
                 'INVALID_CREDENTIALS',
                 null,
                 401
+            );
+        }
+
+        if ($user->isSuspended()) {
+            return $this->error(
+                'Your account has been suspended by an administrator. Please contact support.',
+                'ACCOUNT_SUSPENDED',
+                null,
+                403
             );
         }
 

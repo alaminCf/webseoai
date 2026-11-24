@@ -16,6 +16,8 @@ export interface User {
   bio?: string | null;
   auth_provider?: 'email' | 'google' | 'google+email' | string;
   google_connected?: boolean;
+  is_super_admin?: boolean;
+  status?: 'active' | 'suspended' | string;
   created_at?: string | null;
 }
 

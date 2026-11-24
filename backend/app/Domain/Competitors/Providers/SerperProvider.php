@@ -4,18 +4,20 @@ namespace App\Domain\Competitors\Providers;
 
 use App\Domain\Competitors\Contracts\CompetitorProviderInterface;
 use App\Domain\Competitors\Support\CountryCatalog;
+use App\Models\PlatformApiKey;
 use App\Models\WebsiteIntegration;
 use Illuminate\Support\Facades\Http;
 use Throwable;
 
 /**
  * Serper.dev Google Search API adapter (2,500 free queries on signup).
- * Covers live Google Organic SERP snapshots and multi-query competitor discovery.
+ * Supports multi-key pool auto-failover, workspace BYOK keys, and server env keys.
  */
 class SerperProvider implements CompetitorProviderInterface
 {
     private string $apiKey;
     private ?string $runtimeApiKey = null;
+    private ?int $activeOrganizationId = null;
     private string $baseUrl;
     private int $timeout;
 
@@ -132,23 +134,78 @@ class SerperProvider implements CompetitorProviderInterface
         return is_string($creds) ? trim($creds) : '';
     }
 
-    public function resolveEffectiveApiKey(?int $organizationId = null): string
+    /**
+     * Resolve ordered candidate Serper API keys for automatic multi-key pool failover.
+     *
+     * @return array<int, array{key: string, source: string, model: ?PlatformApiKey}>
+     */
+    public function resolveCandidateKeys(?int $organizationId = null): array
     {
         if ($this->runtimeApiKey !== null && $this->runtimeApiKey !== '') {
-            return $this->runtimeApiKey;
+            return [['key' => $this->runtimeApiKey, 'source' => 'runtime', 'model' => null]];
         }
 
-        $envKey = self::resolveEnvApiKey();
-        if ($envKey !== '') {
-            return $envKey;
-        }
-
+        // If this workspace saved its own BYOK Serper key, use ONLY that key (never consume platform credits)
         $workspaceKey = self::resolveWorkspaceApiKey($organizationId);
         if ($workspaceKey !== '') {
-            return $workspaceKey;
+            return [['key' => $workspaceKey, 'source' => 'workspace_byok', 'model' => null]];
         }
 
-        return self::resolvePlatformSharedApiKey();
+        $candidates = [];
+        $seen = [];
+
+        // 1. Admin-managed Multi-Key Pool (ordered by priority ASC, id ASC)
+        try {
+            $poolKeys = PlatformApiKey::where('provider', 'serper')
+                ->where('status', PlatformApiKey::STATUS_ACTIVE)
+                ->orderBy('priority')
+                ->orderBy('id')
+                ->get();
+
+            foreach ($poolKeys as $pk) {
+                $raw = $pk->getDecryptedKey();
+                if ($raw !== '' && !isset($seen[$raw])) {
+                    $seen[$raw] = true;
+                    $candidates[] = [
+                        'key' => $raw,
+                        'source' => 'platform_pool',
+                        'model' => $pk,
+                    ];
+                }
+            }
+        } catch (Throwable) {
+            // Table may not exist yet during early boot
+        }
+
+        // 2. Server environment variable (SERPER_API_KEY)
+        $envKey = self::resolveEnvApiKey();
+        if ($envKey !== '' && !isset($seen[$envKey])) {
+            $seen[$envKey] = true;
+            $candidates[] = [
+                'key' => $envKey,
+                'source' => 'server_env',
+                'model' => null,
+            ];
+        }
+
+        // 3. Legacy platform owner (agency_internal) saved Serper integration
+        $legacyKey = self::resolvePlatformSharedApiKey();
+        if ($legacyKey !== '' && !isset($seen[$legacyKey])) {
+            $seen[$legacyKey] = true;
+            $candidates[] = [
+                'key' => $legacyKey,
+                'source' => 'platform_legacy',
+                'model' => null,
+            ];
+        }
+
+        return $candidates;
+    }
+
+    public function resolveEffectiveApiKey(?int $organizationId = null): string
+    {
+        $candidates = $this->resolveCandidateKeys($organizationId);
+        return $candidates[0]['key'] ?? '';
     }
 
     public function getName(): string
@@ -163,7 +220,10 @@ class SerperProvider implements CompetitorProviderInterface
 
     public function isConfigured(?int $organizationId = null): bool
     {
-        $this->apiKey = $this->resolveEffectiveApiKey($organizationId);
+        if ($organizationId !== null) {
+            $this->activeOrganizationId = $organizationId;
+        }
+        $this->apiKey = $this->resolveEffectiveApiKey($this->activeOrganizationId);
         return $this->apiKey !== '';
     }
 
@@ -366,15 +426,69 @@ class SerperProvider implements CompetitorProviderInterface
                 $basePayload['device'] = 'mobile';
             }
 
-            // Step 1: Always fetch Google Page 1 first (returns organic #1-#10 + Local Pack + PAA + Answer Box)
-            $page1Payload = array_merge($basePayload, ['page' => 1]);
-            $res1 = Http::withHeaders([
-                'X-API-KEY' => $this->apiKey,
-                'Content-Type' => 'application/json',
-            ])->timeout($this->timeout)->post("{$this->baseUrl}/search", $page1Payload);
+            // Step 1: Fetch Google Page 1 with Multi-Key Pool Auto-Failover
+            // If Key #1 is exhausted (400/402/429/credit error), immediately mark exhausted and retry with Key #2!
+            $candidates = $this->resolveCandidateKeys($this->activeOrganizationId);
+            if (empty($candidates)) {
+                return ['available' => false, 'provider' => $this->getName(), 'serp_features' => [], 'organic_results' => [], 'error' => 'SERPER_API_KEY is not configured.'];
+            }
 
-            if (!$res1->successful()) {
-                return ['available' => false, 'provider' => $this->getName(), 'serp_features' => [], 'organic_results' => [], 'http_status' => $res1->status(), 'error' => 'Serper.dev request failed (HTTP ' . $res1->status() . ')'];
+            $page1Payload = array_merge($basePayload, ['page' => 1]);
+            $res1 = null;
+            $activeKey = '';
+            $activeSource = 'server_env';
+            /** @var ?PlatformApiKey $activeModel */
+            $activeModel = null;
+            $lastFailureMsg = 'Serper.dev request failed.';
+            $lastFailureStatus = 500;
+
+            foreach ($candidates as $cand) {
+                $attemptRes = Http::withHeaders([
+                    'X-API-KEY' => $cand['key'],
+                    'Content-Type' => 'application/json',
+                ])->timeout($this->timeout)->post("{$this->baseUrl}/search", $page1Payload);
+
+                if ($attemptRes->successful()) {
+                    $res1 = $attemptRes;
+                    $activeKey = $cand['key'];
+                    $activeSource = $cand['source'];
+                    $activeModel = $cand['model'];
+                    $this->apiKey = $activeKey;
+                    break;
+                }
+
+                $status = $attemptRes->status();
+                $bodyMsg = trim((string) ($attemptRes->json('message') ?? $attemptRes->json('error') ?? $attemptRes->body()));
+                $lowerBody = strtolower($bodyMsg);
+                $lastFailureStatus = $status;
+                $lastFailureMsg = $bodyMsg !== '' ? "Serper.dev HTTP {$status}: {$bodyMsg}" : "Serper.dev request failed (HTTP {$status})";
+
+                $isExhausted = in_array($status, [400, 402, 429], true)
+                    || str_contains($lowerBody, 'not enough credits')
+                    || str_contains($lowerBody, 'credit')
+                    || str_contains($lowerBody, 'quota')
+                    || str_contains($lowerBody, 'limit');
+                $isAuthFailure = in_array($status, [401, 403], true);
+
+                if ($cand['model'] instanceof PlatformApiKey) {
+                    if ($isExhausted) {
+                        $cand['model']->markExhausted($lastFailureMsg);
+                    } elseif ($isAuthFailure) {
+                        $cand['model']->markError($lastFailureMsg);
+                    }
+                }
+
+                // Auto-failover to next active pool key on exhaustion or auth failure
+                if ($isExhausted || $isAuthFailure) {
+                    continue;
+                }
+
+                // Non-key error (e.g. 5xx outage): stop retrying
+                break;
+            }
+
+            if (!$res1 || !$res1->successful()) {
+                return ['available' => false, 'provider' => $this->getName(), 'serp_features' => [], 'organic_results' => [], 'http_status' => $lastFailureStatus, 'error' => $lastFailureMsg];
             }
 
             $json1 = $res1->json() ?? [];
@@ -542,12 +656,18 @@ class SerperProvider implements CompetitorProviderInterface
                 }
             }
 
+            if ($activeModel instanceof PlatformApiKey) {
+                $activeModel->recordUsage($pagesFetched);
+            }
+
             return [
                 'available' => true,
                 'provider' => $this->getName(),
                 'http_status' => $res1->status(),
                 'cost_usd' => round($pagesFetched * 0.001, 4),
                 'pages_fetched' => $pagesFetched,
+                'platform_api_key_id' => $activeModel?->id,
+                'key_source' => $activeSource,
                 'serp_features' => $features,
                 'organic_results' => $organic,
                 'local_pack' => $places,

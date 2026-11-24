@@ -63,6 +63,9 @@ export function Sidebar({
     { id: 'autopilot', label: 'Autopilot', icon: Zap },
     { id: 'team', label: 'Clients & Team', icon: Users },
     { id: 'settings', label: 'Settings', icon: Settings },
+    ...(user?.is_super_admin
+      ? [{ id: 'admin', label: 'Admin Panel', icon: Shield, badge: 'ADMIN' }]
+      : []),
   ];
 
   return (

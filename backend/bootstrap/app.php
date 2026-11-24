@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Middleware\EnsureOrganizationContext;
+use App\Http\Middleware\EnsureSuperAdmin;
 use App\Http\Middleware\RequireOrganizationRole;
 use Illuminate\Auth\AuthenticationException;
 use Illuminate\Foundation\Application;
@@ -24,6 +25,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'org.context' => EnsureOrganizationContext::class,
             'org.role' => RequireOrganizationRole::class,
+            'super.admin' => EnsureSuperAdmin::class,
         ]);
 
         // State-less API rate limiting & JSON accepts

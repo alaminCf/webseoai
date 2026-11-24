@@ -112,7 +112,8 @@ class GoogleAuthService
 
             if (!$user) {
                 $existingUsersCount = User::count();
-                $isPublicRegistrationAllowed = (bool) config('app.allow_public_registration', true);
+                $regSettings = \App\Models\PlatformSetting::getValue('registration');
+                $isPublicRegistrationAllowed = (bool) ($regSettings['allow_public_registration'] ?? config('app.allow_public_registration', true));
                 if ($existingUsersCount > 0 && !$isPublicRegistrationAllowed) {
                     throw new Exception('Public registration is currently disabled for this deployment.');
                 }
@@ -124,6 +125,8 @@ class GoogleAuthService
                     'google_id' => $googleId,
                     'avatar_url' => $picture !== '' ? $picture : null,
                     'auth_provider' => 'google',
+                    'is_super_admin' => $existingUsersCount === 0,
+                    'status' => 'active',
                     'email_verified_at' => now(),
                     'password' => Hash::make(Str::random(40)),
                 ]);
@@ -132,7 +135,7 @@ class GoogleAuthService
                 $baseSlug = Str::slug($orgName) ?: 'workspace';
                 $billingPlan = $existingUsersCount === 0
                     ? 'agency_internal'
-                    : (string) config('saas.default_signup_plan', 'agency_pro');
+                    : (string) ($regSettings['default_signup_plan'] ?? config('saas.default_signup_plan', 'agency_pro'));
 
                 $organization = Organization::create([
                     'name' => $orgName,
@@ -156,6 +159,10 @@ class GoogleAuthService
                     $request
                 );
             } else {
+                if ($user->isSuspended()) {
+                    throw new Exception('Your account has been suspended by an administrator. Please contact support.');
+                }
+
                 // Link Google ID & keep Google profile photo synced unless user uploaded a custom photo
                 $updates = [];
                 if (empty($user->google_id)) {

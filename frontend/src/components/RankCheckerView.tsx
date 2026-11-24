@@ -11,6 +11,7 @@ import {
   ExternalLink,
   CheckCircle2,
   AlertTriangle,
+  AlertCircle,
   Crosshair,
   TrendingUp,
   TrendingDown,
@@ -69,6 +70,23 @@ interface RecentRankCheck {
   captured_at: string | null;
 }
 
+interface SerpQuotaStatus {
+  plan: string;
+  is_byok: boolean;
+  is_unlimited: boolean;
+  daily_used: number;
+  daily_limit: number;
+  daily_remaining: number | null;
+  monthly_used: number;
+  monthly_limit: number;
+  monthly_remaining: number | null;
+  cache_hits_month: number;
+  exceeded: boolean;
+  exceeded_reason: 'daily' | 'monthly' | null;
+  daily_resets_at: string;
+  monthly_resets_at: string;
+}
+
 interface RankCheckerContextData {
   website: {
     id: number;
@@ -84,6 +102,11 @@ interface RankCheckerContextData {
     source?: 'server_env' | 'workspace_key' | 'platform_shared' | 'unconfigured';
     key_hint?: string | null;
     has_workspace_key?: boolean;
+  };
+  quota?: SerpQuotaStatus | null;
+  defaults?: {
+    depth: number;
+    cache_ttl_hours: number;
   };
   gsc_top_keywords: GscTopKeyword[];
   recent_checks: RecentRankCheck[];
@@ -207,14 +230,15 @@ export function RankCheckerView({
   const [context, setContext] = useState<RankCheckerContextData | null>(null);
   const [isLoadingContext, setIsLoadingContext] = useState<boolean>(false);
 
-  // Search form controls
+  // Search form controls (Default Top 30 Pages 1-3 + Smart 12h Cross-User Cache ON to conserve credits)
   const [keyword, setKeyword] = useState<string>('');
   const [country, setCountry] = useState<string>('SG');
   const [location, setLocation] = useState<string>('');
   const [language, setLanguage] = useState<string>('en');
   const [device, setDevice] = useState<'desktop' | 'mobile'>('desktop');
-  const [depth, setDepth] = useState<number>(100);
-  const [forceRefresh, setForceRefresh] = useState<boolean>(true);
+  const [depth, setDepth] = useState<number>(30);
+  const [forceRefresh, setForceRefresh] = useState<boolean>(false);
+  const [quotaExceeded, setQuotaExceeded] = useState<boolean>(false);
 
   // Searchable country dropdown
   const [countryDropdownOpen, setCountryDropdownOpen] = useState<boolean>(false);
@@ -258,30 +282,29 @@ export function RankCheckerView({
     setResult(null);
     setErrorMessage(null);
     try {
-      const saved = localStorage.getItem(`wsa_rank_geo_v2_${website.id}`) || localStorage.getItem(`wsa_rank_geo_${website.id}`);
+      const saved = localStorage.getItem(`wsa_rank_geo_v3_${website.id}`) || localStorage.getItem(`wsa_rank_geo_v2_${website.id}`) || localStorage.getItem(`wsa_rank_geo_${website.id}`);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (parsed.country) setCountry(parsed.country);
         if (typeof parsed.location === 'string') setLocation(parsed.location);
         if (parsed.language) setLanguage(parsed.language);
         if (parsed.device === 'mobile' || parsed.device === 'desktop') setDevice(parsed.device);
-        // Upgrade legacy default 50 to 100 auto-find if from v1 key
-        const isV2 = Boolean(localStorage.getItem(`wsa_rank_geo_v2_${website.id}`));
-        if (isV2 && [30, 50, 100].includes(parsed.depth)) {
+        const isV3 = Boolean(localStorage.getItem(`wsa_rank_geo_v3_${website.id}`));
+        if (isV3 && [20, 30, 50, 100].includes(parsed.depth)) {
           setDepth(parsed.depth);
         } else {
-          setDepth(100);
+          setDepth(30);
         }
       } else {
         setCountry((website.target_country || 'US').toUpperCase());
         setLocation('');
         setLanguage((website.preferred_language || 'en').toLowerCase());
-        setDepth(100);
+        setDepth(30);
       }
     } catch {
       setCountry((website.target_country || 'US').toUpperCase());
       setLocation('');
-      setDepth(100);
+      setDepth(30);
     }
   }, [website]);
 
@@ -290,7 +313,7 @@ export function RankCheckerView({
     if (!website) return;
     try {
       localStorage.setItem(
-        `wsa_rank_geo_v2_${website.id}`,
+        `wsa_rank_geo_v3_${website.id}`,
         JSON.stringify({ country, location, language, device, depth })
       );
     } catch {
@@ -307,6 +330,9 @@ export function RankCheckerView({
         setContext(res.data);
         if (!res.data.provider.configured) {
           setShowKeySetup(true);
+        }
+        if (res.data.quota && !res.data.quota.exceeded) {
+          setQuotaExceeded(false);
         }
       }
     } finally {
@@ -366,21 +392,27 @@ export function RankCheckerView({
 
         if (res.success && res.data) {
           setResult(res.data);
+          setQuotaExceeded(false);
           // Show full continuous list from #1 down through the target's ranking page
           setSelectedPage('all');
 
+          const cacheNote = (res.data as any).from_global_cache ? ' (Smart Cache • 0 credits)' : '';
           if (res.data.target_ranking?.found) {
             toast.success(
-              `Found #${res.data.target_ranking.position} (Google Page ${res.data.target_ranking.google_page}) in ${res.data.location}!`
+              `Found #${res.data.target_ranking.position} (Google Page ${res.data.target_ranking.google_page}) in ${res.data.location}!${cacheNote}`
             );
           } else {
-            toast.info(`Checked Top ${res.data.results_returned} in ${res.data.location} — site not found in top results.`);
+            toast.info(`Checked Top ${res.data.results_returned} in ${res.data.location} — site not found in top results.${cacheNote}`);
           }
 
           loadContext();
         } else {
           const msg = res.error?.message || 'Live Google rank check failed.';
           setErrorMessage(msg);
+          if (res.error?.code === 'SERP_QUOTA_EXCEEDED') {
+            setQuotaExceeded(true);
+            loadContext();
+          }
           toast.error(msg);
         }
       } catch {
@@ -583,10 +615,30 @@ export function RankCheckerView({
                   >
                     <KeyRound className="w-3 h-3" />
                     {context.provider.configured
-                      ? `Live SERP: ${context.provider.label}${context.provider.key_hint ? ` (${context.provider.key_hint})` : ''}`
+                      ? `Own Serper Key Active${context.provider.key_hint ? ` (${context.provider.key_hint})` : ''}`
                       : 'Connect Live Google Search Key'}
                   </button>
                 )
+              )}
+              {context?.quota && (
+                <button
+                  type="button"
+                  onClick={() => setShowKeySetup((v) => !v)}
+                  className={`inline-flex items-center gap-1.5 text-[11px] font-mono px-2.5 py-0.5 rounded-md border transition ${
+                    context.quota.exceeded
+                      ? 'bg-rose-500/15 text-rose-300 border-rose-500/40'
+                      : context.quota.is_unlimited
+                        ? 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:border-zinc-700'
+                        : 'bg-zinc-900 text-cyan-300 border-zinc-800 hover:border-cyan-500/40'
+                  }`}
+                  title="Click to connect your own Serper.dev API key for unlimited checks"
+                >
+                  {context.quota.is_byok
+                    ? 'BYOK Unlimited'
+                    : context.quota.is_unlimited
+                      ? 'Unlimited Credits'
+                      : `${context.quota.monthly_remaining ?? 0}/${context.quota.monthly_limit} mo • ${context.quota.daily_remaining ?? 0}/${context.quota.daily_limit} today`}
+                </button>
               )}
             </div>
             <h1 className="text-lg sm:text-xl font-bold text-zinc-100">
@@ -607,6 +659,32 @@ export function RankCheckerView({
             />
           </div>
         </div>
+
+        {/* Quota Reached Fallback Card (Upgrade OR Connect Own BYOK Key) */}
+        {(quotaExceeded || context?.quota?.exceeded) && (
+          <div className="mt-4 p-4 rounded-xl bg-rose-950/25 border border-rose-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <div className="text-xs font-bold text-rose-200 flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 text-rose-400" />
+                Monthly / Daily Live SERP Credit Limit Reached
+              </div>
+              <p className="text-[11px] text-rose-100/80 max-w-2xl">
+                You&apos;ve used your workspace&apos;s included platform SERP credits (
+                {context?.quota?.daily_used ?? 0}/{context?.quota?.daily_limit ?? 0} today •{' '}
+                {context?.quota?.monthly_used ?? 0}/{context?.quota?.monthly_limit ?? 0} this month).
+                Cached keywords still load for free — or plug in your own free Serper.dev key (2,500 searches) for unlimited live checks.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowKeySetup(true)}
+              className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition whitespace-nowrap flex items-center gap-1.5 shrink-0"
+            >
+              <KeyRound className="w-3.5 h-3.5" />
+              Use My Own Free Serper Key
+            </button>
+          </div>
+        )}
 
         {/* 1-Click Serper.dev Workspace API Key Setup Panel */}
         {showKeySetup && (
@@ -919,27 +997,29 @@ export function RankCheckerView({
                   onChange={(e) => setDepth(parseInt(e.target.value, 10))}
                   className="bg-transparent text-zinc-200 font-medium focus:outline-none"
                 >
-                  <option value={100} className="bg-zinc-900 text-zinc-100">
-                    Auto-Find Top 100 (Pages 1–10)
+                  <option value={30} className="bg-zinc-900 text-zinc-100">
+                    Top 30 (Pages 1–3 • Recommended)
                   </option>
                   <option value={50} className="bg-zinc-900 text-zinc-100">
                     Up to Top 50 (Pages 1–5)
                   </option>
-                  <option value={30} className="bg-zinc-900 text-zinc-100">
-                    Up to Top 30 (Pages 1–3)
+                  <option value={100} className="bg-zinc-900 text-zinc-100">
+                    Auto-Find Top 100 (Pages 1–10)
                   </option>
                 </select>
               </div>
 
-              {/* Fresh Live Checkbox */}
-              <label className="inline-flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer select-none px-1">
+              {/* Fresh Live Checkbox (Off by default — Smart Cross-User Cache saves 60-80% credits!) */}
+              <label className="inline-flex items-center gap-1.5 text-xs text-zinc-400 cursor-pointer select-none px-1" title="Unchecked uses Smart Cross-User Cache (0 credits). Check only when you need an immediate live refresh.">
                 <input
                   type="checkbox"
                   checked={forceRefresh}
                   onChange={(e) => setForceRefresh(e.target.checked)}
                   className="rounded border-zinc-700 bg-zinc-900 text-emerald-500 focus:ring-emerald-500"
                 />
-                <span>Live Fresh (bypass cache)</span>
+                <span>
+                  Live Fresh (bypass {context?.defaults?.cache_ttl_hours ?? 12}h cache)
+                </span>
               </label>
             </div>
 

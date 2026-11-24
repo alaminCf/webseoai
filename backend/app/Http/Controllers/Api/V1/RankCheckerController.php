@@ -55,18 +55,20 @@ class RankCheckerController extends Controller
             $validated['language'] ?? ($website->preferred_language ?: 'en'),
             $validated['device'] ?? 'desktop',
             $validated['location'] ?? null,
-            (int) ($validated['depth'] ?? 100),
+            isset($validated['depth']) ? (int) $validated['depth'] : null,
             (bool) ($validated['monitor'] ?? false),
-            array_key_exists('force_refresh', $validated) ? (bool) $validated['force_refresh'] : true,
-            array_key_exists('stop_when_found', $validated) ? (bool) $validated['stop_when_found'] : true
+            array_key_exists('force_refresh', $validated) ? (bool) $validated['force_refresh'] : false,
+            array_key_exists('stop_when_found', $validated) ? (bool) $validated['stop_when_found'] : true,
+            $request->user()?->id
         );
 
         if (!($res['available'] ?? false)) {
+            $isQuota = ($res['code'] ?? '') === 'SERP_QUOTA_EXCEEDED';
             return $this->error(
                 $res['error'] ?? 'Could not run live rank check.',
-                'RANK_CHECK_UNAVAILABLE',
-                null,
-                422
+                $isQuota ? 'SERP_QUOTA_EXCEEDED' : 'RANK_CHECK_UNAVAILABLE',
+                $isQuota ? ['quota' => $res['quota'] ?? null] : null,
+                $isQuota ? 429 : 422
             );
         }
 

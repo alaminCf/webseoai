@@ -18,8 +18,10 @@ use App\Models\WebsiteIntegration;
  */
 class RankCheckerService
 {
-    public function __construct(private CompetitorProviderManager $providerManager)
-    {
+    public function __construct(
+        private CompetitorProviderManager $providerManager,
+        private SerpCreditService $serpCreditService
+    ) {
     }
 
     /**
@@ -93,24 +95,34 @@ class RankCheckerService
         $serpProvider = $this->providerManager->resolveForCapability('serp', $website->organization_id);
         $envSerperActive = SerperProvider::resolveEnvApiKey() !== '';
         $workspaceSerper = SerperProvider::resolveWorkspaceIntegration($website->organization_id);
-        $platformSerperActive = !$envSerperActive && !$workspaceSerper && SerperProvider::resolvePlatformSharedApiKey() !== '';
+        $platformPoolActive = false;
+        try {
+            $platformPoolActive = \App\Models\PlatformApiKey::where('provider', 'serper')
+                ->where('status', \App\Models\PlatformApiKey::STATUS_ACTIVE)
+                ->exists();
+        } catch (\Throwable) {
+            $platformPoolActive = false;
+        }
+        $platformLegacyActive = !$envSerperActive && !$workspaceSerper && !$platformPoolActive && SerperProvider::resolvePlatformSharedApiKey() !== '';
 
         $providerSource = 'unconfigured';
         $keyHint = null;
         if ($serpProvider->getName() === 'serper') {
-            if ($envSerperActive) {
-                $providerSource = 'server_env';
-            } elseif ($workspaceSerper) {
+            if ($workspaceSerper) {
                 $providerSource = 'workspace_key';
                 $keyHint = $workspaceSerper->metadata['key_hint'] ?? null;
-            } elseif ($platformSerperActive) {
+            } elseif ($platformPoolActive || $platformLegacyActive) {
                 $providerSource = 'platform_shared';
-                // Never expose the platform owner's key hint to other tenants
                 $keyHint = null;
+            } elseif ($envSerperActive) {
+                $providerSource = 'server_env';
             }
         } elseif ($serpProvider->getName() !== 'first_party_crawl') {
             $providerSource = 'server_env';
         }
+
+        $org = $website->organization;
+        $quotaStatus = $org ? $this->serpCreditService->getQuotaStatus($org) : null;
 
         return [
             'website' => [
@@ -127,6 +139,11 @@ class RankCheckerService
                 'source' => $providerSource,
                 'key_hint' => $keyHint,
                 'has_workspace_key' => $workspaceSerper !== null,
+            ],
+            'quota' => $quotaStatus,
+            'defaults' => [
+                'depth' => $this->serpCreditService->getDefaultDepth(),
+                'cache_ttl_hours' => $this->serpCreditService->getCacheTtlHours(),
             ],
             'gsc_top_keywords' => $gscKeywords,
             'recent_checks' => $recentChecks,
@@ -203,10 +220,11 @@ class RankCheckerService
         string $language = 'en',
         string $device = 'desktop',
         ?string $location = null,
-        int $depth = 100,
+        ?int $depth = null,
         bool $monitor = false,
-        bool $forceRefresh = true,
-        bool $stopWhenFound = true
+        bool $forceRefresh = false,
+        bool $stopWhenFound = true,
+        ?int $userId = null
     ): array {
         $keyword = trim($keyword);
         $country = CountryCatalog::normalizeCodes([$country], $website->target_country ?: 'US', 1)[0];
@@ -215,40 +233,142 @@ class RankCheckerService
         $device = strtolower(trim($device)) === 'mobile' ? 'mobile' : 'desktop';
         $cleanLocation = trim((string) ($location ?? ''));
         $effectiveLocation = $cleanLocation !== '' ? $cleanLocation : $countryName;
-        $depth = in_array($depth, [20, 30, 50, 100], true) ? $depth : 100;
+        $defaultDepth = $this->serpCreditService->getDefaultDepth();
+        $depth = ($depth !== null && in_array($depth, [20, 30, 50, 100], true)) ? $depth : $defaultDepth;
         $targetDomain = CompetitorDomain::normalizeDomain($website->domain);
+        $org = $website->organization;
 
-        $provider = $this->providerManager->resolveForCapability('serp', $website->organization_id);
-        if ($provider->getName() === 'first_party_crawl') {
-            return [
-                'available' => false,
-                'provider' => 'unconfigured',
-                'error' => 'Live Google SERP provider is not connected yet. Paste your free Serper.dev API key right inside the "Connect Live Google Search Engine" box above (instant, no redeploy needed), or attach SERPER_API_KEY to your Vercel Backend service.',
-            ];
+        // 1. Smart Cross-User Global SERP Cache (0 credits spent when cached!)
+        $res = null;
+        $fromGlobalCache = false;
+        $providerName = 'serper';
+        $providerLabel = 'Serper.dev (Google Search API)';
+        $creditsSpentNow = 0;
+
+        if (!$forceRefresh) {
+            $cachedEntry = $this->serpCreditService->lookupGlobalCache(
+                $keyword,
+                $country,
+                $language,
+                $device,
+                $effectiveLocation,
+                $depth,
+                $targetDomain
+            );
+            if ($cachedEntry) {
+                $decoded = $cachedEntry->getDecodedPayload();
+                if (!empty($decoded['available'])) {
+                    $res = $decoded;
+                    $res['from_cache'] = true;
+                    $res['cached_at'] = $cachedEntry->updated_at?->toIso8601String();
+                    $providerName = $cachedEntry->provider ?: 'serper';
+                    $fromGlobalCache = true;
+
+                    // Record zero-credit cache hit for analytics
+                    $this->serpCreditService->recordUsage(
+                        $website,
+                        $userId,
+                        null,
+                        $providerName,
+                        $keyword,
+                        $country,
+                        $depth,
+                        0,
+                        true,
+                        'global_cache'
+                    );
+                }
+            }
         }
 
-        $stopDomainArg = $stopWhenFound ? $targetDomain : null;
-        $cacheKey = "{$provider->getName()}:rankcheck:{$keyword}:{$country}:{$language}:{$device}:{$effectiveLocation}:{$depth}:" . ($stopWhenFound ? 'auto' : 'full');
-        $res = $this->providerManager->cachedCall(
-            $website,
-            'serp',
-            $cacheKey,
-            "rank_check:{$keyword}:{$country}",
-            function () use ($provider, $keyword, $country, $language, $device, $effectiveLocation, $depth, $stopDomainArg) {
-                if ($provider instanceof SerperProvider) {
-                    return $provider->fetchSerp($keyword, $country, $language, $device, $effectiveLocation, $depth, $stopDomainArg);
-                }
-                return $provider->fetchSerp($keyword, $country, $language, $device, $effectiveLocation);
-            },
-            $forceRefresh
-        );
+        // 2. If not served from Global Cache, verify provider & per-workspace SERP quota
+        if (!$fromGlobalCache) {
+            $provider = $this->providerManager->resolveForCapability('serp', $website->organization_id);
+            if ($provider->getName() === 'first_party_crawl') {
+                return [
+                    'available' => false,
+                    'provider' => 'unconfigured',
+                    'error' => 'Live Google SERP provider is not connected yet. Paste your free Serper.dev API key right inside the "Connect Live Google Search Engine" box above, or ask the platform administrator to add a key in Admin Panel.',
+                ];
+            }
 
-        if (!($res['available'] ?? false)) {
-            return [
-                'available' => false,
-                'provider' => $provider->getName(),
-                'error' => $res['error'] ?? 'Live SERP provider request failed.',
-            ];
+            $providerName = $provider->getName();
+            $providerLabel = $provider->getLabel();
+
+            // Check per-workspace daily/monthly quota (skipped automatically for BYOK & agency_internal)
+            if ($org) {
+                $quota = $this->serpCreditService->getQuotaStatus($org);
+                if ($quota['exceeded']) {
+                    $reasonLabel = $quota['exceeded_reason'] === 'monthly'
+                        ? "monthly limit ({$quota['monthly_used']}/{$quota['monthly_limit']} credits)"
+                        : "daily limit ({$quota['daily_used']}/{$quota['daily_limit']} credits)";
+
+                    return [
+                        'available' => false,
+                        'code' => 'SERP_QUOTA_EXCEEDED',
+                        'provider' => $providerName,
+                        'quota' => $quota,
+                        'error' => "You have reached your workspace's {$reasonLabel} for live Google rank checks. Upgrade your plan or connect your own free Serper.dev API key (2,500 free searches) for unlimited checks.",
+                    ];
+                }
+            }
+
+            $stopDomainArg = $stopWhenFound ? $targetDomain : null;
+            $cacheKey = "{$providerName}:rankcheck:{$keyword}:{$country}:{$language}:{$device}:{$effectiveLocation}:{$depth}:" . ($stopWhenFound ? 'auto' : 'full');
+            $res = $this->providerManager->cachedCall(
+                $website,
+                'serp',
+                $cacheKey,
+                "rank_check:{$keyword}:{$country}",
+                function () use ($provider, $keyword, $country, $language, $device, $effectiveLocation, $depth, $stopDomainArg) {
+                    if ($provider instanceof SerperProvider) {
+                        return $provider->fetchSerp($keyword, $country, $language, $device, $effectiveLocation, $depth, $stopDomainArg);
+                    }
+                    return $provider->fetchSerp($keyword, $country, $language, $device, $effectiveLocation);
+                },
+                true
+            );
+
+            if (!($res['available'] ?? false)) {
+                return [
+                    'available' => false,
+                    'provider' => $providerName,
+                    'error' => $res['error'] ?? 'Live SERP provider request failed.',
+                ];
+            }
+
+            $pagesFetched = max(1, (int) ($res['pages_fetched'] ?? 1));
+            $creditsSpentNow = $pagesFetched;
+            $keySource = (string) ($res['key_source'] ?? 'server_env');
+            $platformKeyId = isset($res['platform_api_key_id']) ? (int) $res['platform_api_key_id'] : null;
+
+            // Store clean SERP results into Smart Cross-User Global Cache (depth = actual fetched pages * 10)
+            $effectiveCachedDepth = min($depth, max(10, $pagesFetched * 10));
+            $this->serpCreditService->storeGlobalCache(
+                $providerName,
+                $keyword,
+                $country,
+                $language,
+                $device,
+                $effectiveLocation,
+                $effectiveCachedDepth,
+                $res,
+                $pagesFetched
+            );
+
+            // Record exact credits consumed in the usage ledger
+            $this->serpCreditService->recordUsage(
+                $website,
+                $userId,
+                $platformKeyId,
+                $providerName,
+                $keyword,
+                $country,
+                $depth,
+                $pagesFetched,
+                false,
+                $keySource
+            );
         }
 
         $websiteNameLower = strtolower(trim((string) $website->name));
@@ -361,7 +481,7 @@ class RankCheckerService
             'target_position' => $targetPosition,
             'competitor_presence' => $competitorPresence,
             'content_patterns' => $extras,
-            'data_source' => $provider->getName(),
+            'data_source' => $providerName,
             'captured_at' => now(),
         ]);
 
@@ -401,8 +521,11 @@ class RankCheckerService
             'location' => $effectiveLocation,
             'depth_checked' => $depth,
             'results_returned' => count($annotatedResults),
-            'provider' => $provider->getName(),
-            'provider_label' => $provider->getLabel(),
+            'provider' => $providerName,
+            'provider_label' => $providerLabel,
+            'credits_used' => $creditsSpentNow,
+            'from_global_cache' => $fromGlobalCache,
+            'quota' => $org ? $this->serpCreditService->getQuotaStatus($org) : null,
             'from_cache' => (bool) ($res['from_cache'] ?? false),
             'captured_at' => $snapshot->captured_at?->toIso8601String(),
             'google_verify_url' => $googleVerifyUrl,
