@@ -280,6 +280,15 @@ class AuthController extends Controller
     {
         $user = $request->user();
 
+        if ($user->isSuspended()) {
+            return $this->error(
+                'Your account has been suspended by an administrator.',
+                'ACCOUNT_SUSPENDED',
+                null,
+                403
+            );
+        }
+
         $memberships = OrganizationMember::with('organization')
             ->where('user_id', $user->id)
             ->get();

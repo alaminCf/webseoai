@@ -49,6 +49,41 @@ function extractApiError(
   return error.message || fallback;
 }
 
+const CACHED_USER_KEY = 'web_seo_cached_user';
+const CACHED_ORGS_KEY = 'web_seo_cached_orgs';
+
+function saveCachedSession(u: User | null, orgs: Organization[] | null) {
+  if (typeof window === 'undefined') return;
+  try {
+    if (u) {
+      localStorage.setItem(CACHED_USER_KEY, JSON.stringify(u));
+    } else {
+      localStorage.removeItem(CACHED_USER_KEY);
+    }
+    if (orgs) {
+      localStorage.setItem(CACHED_ORGS_KEY, JSON.stringify(orgs));
+    } else {
+      localStorage.removeItem(CACHED_ORGS_KEY);
+    }
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+function loadCachedSession(): { user: User | null; organizations: Organization[] } {
+  if (typeof window === 'undefined') return { user: null, organizations: [] };
+  try {
+    const rawUser = localStorage.getItem(CACHED_USER_KEY);
+    const rawOrgs = localStorage.getItem(CACHED_ORGS_KEY);
+    return {
+      user: rawUser ? (JSON.parse(rawUser) as User) : null,
+      organizations: rawOrgs ? (JSON.parse(rawOrgs) as Organization[]) : [],
+    };
+  } catch {
+    return { user: null, organizations: [] };
+  }
+}
+
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -58,11 +93,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const toast = useToast();
 
+  const clearLocalSession = useCallback(() => {
+    api.setToken(null);
+    api.setOrganizationId(null);
+    saveCachedSession(null, null);
+    setUser(null);
+    setOrganizations([]);
+    setCurrentOrganization(null);
+  }, []);
+
   const fetchUserProfile = useCallback(async (googleLoginWelcome?: { isNew: boolean }) => {
     const token = api.getToken();
     if (!token) {
+      saveCachedSession(null, null);
       setIsLoading(false);
       return;
+    }
+
+    // Instant persistent hydration from cached session so page reloads & browser restarts
+    // never flash back to the login screen while verifying with the backend.
+    const cached = loadCachedSession();
+    if (cached.user && !googleLoginWelcome) {
+      setUser(cached.user);
+      setOrganizations(cached.organizations);
+      const savedOrgId = api.getOrganizationId();
+      const activeCached =
+        cached.organizations.find((o) => o.id === savedOrgId) || cached.organizations[0] || null;
+      if (activeCached) {
+        setCurrentOrganization(activeCached);
+      }
+      setIsLoading(false);
     }
 
     try {
@@ -75,6 +135,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser(res.data.user);
         const orgs = res.data.organizations || [];
         setOrganizations(orgs);
+        saveCachedSession(res.data.user, orgs);
 
         const savedOrgId = api.getOrganizationId();
         const active = orgs.find((o) => o.id === savedOrgId) || orgs[0] || null;
@@ -92,18 +153,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           );
         }
       } else {
-        // Token expired or invalid
-        api.setToken(null);
-        setUser(null);
-        setOrganizations([]);
-        setCurrentOrganization(null);
+        const errCode = res.error?.code;
+        // ONLY clear the saved login session when the server explicitly rejects the token (401/403).
+        // Never log users out on temporary 502/503/504 cold starts or network glitches!
+        if (errCode === 'UNAUTHENTICATED' || errCode === 'ACCOUNT_SUSPENDED') {
+          clearLocalSession();
+          if (errCode === 'ACCOUNT_SUSPENDED') {
+            toast.error(res.error?.message || 'Your account has been suspended.');
+          }
+        }
       }
     } catch {
-      api.setToken(null);
+      // Keep saved token intact on transient network failure so user stays logged in
     } finally {
       setIsLoading(false);
     }
-  }, [toast]);
+  }, [toast, clearLocalSession]);
 
   useEffect(() => {
     // Check for 1-click Google OAuth callback token delivered via URL fragment (#)
@@ -142,9 +207,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (res.success && res.data) {
         api.setToken(res.data.token);
         setUser(res.data.user);
-        setOrganizations(res.data.organizations || []);
+        const orgs = res.data.organizations || [];
+        setOrganizations(orgs);
+        saveCachedSession(res.data.user, orgs);
 
-        const activeOrg = res.data.current_organization || res.data.organizations[0] || null;
+        const activeOrg = res.data.current_organization || orgs[0] || null;
         setCurrentOrganization(activeOrg);
         if (activeOrg) {
           api.setOrganizationId(activeOrg.id);
@@ -192,6 +259,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setOrganizations(orgs);
         setCurrentOrganization(org);
         api.setOrganizationId(org.id);
+        saveCachedSession(res.data.user, orgs);
 
         toast.success(`Welcome to Web SEO AI, ${res.data.user.name}! Your workspace "${org.name}" is ready.`);
         return { success: true };
@@ -264,6 +332,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const updateUserProfile = (updated: User) => {
     setUser(updated);
+    saveCachedSession(updated, organizations);
   };
 
   const logout = async () => {
@@ -272,11 +341,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // Ignore network errors on logout
     } finally {
-      api.setToken(null);
-      api.setOrganizationId(null);
-      setUser(null);
-      setOrganizations([]);
-      setCurrentOrganization(null);
+      clearLocalSession();
       toast.info('Logged out.');
     }
   };

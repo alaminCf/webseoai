@@ -10,16 +10,47 @@ export function getApiBaseUrl(): string {
   return 'http://localhost:8001/api/v1';
 }
 
+function readCookie(name: string): string | null {
+  if (typeof document === 'undefined') return null;
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = document.cookie.match(new RegExp(`(?:^|; )${escaped}=([^;]*)`));
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function writePersistentCookie(name: string, value: string | null) {
+  if (typeof document === 'undefined') return;
+  const secure = typeof window !== 'undefined' && window.location.protocol === 'https:' ? '; Secure' : '';
+  if (value) {
+    // 365-day persistent cookie backup so login stays saved across browser restarts until explicit logout
+    document.cookie = `${name}=${encodeURIComponent(value)}; path=/; max-age=31536000; SameSite=Lax${secure}`;
+  } else {
+    document.cookie = `${name}=; path=/; max-age=0; SameSite=Lax${secure}`;
+  }
+}
+
 class ApiClient {
   private token: string | null = null;
   private organizationId: number | null = null;
 
   constructor() {
     if (typeof window !== 'undefined') {
-      this.token = localStorage.getItem('web_seo_token');
-      const savedOrg = localStorage.getItem('web_seo_current_org');
+      const lsToken = localStorage.getItem('web_seo_token');
+      const cookieToken = readCookie('web_seo_token');
+      this.token = lsToken || cookieToken;
+      if (this.token && !lsToken) {
+        try {
+          localStorage.setItem('web_seo_token', this.token);
+        } catch {
+          // ignore storage restrictions
+        }
+      }
+
+      const savedOrg = localStorage.getItem('web_seo_current_org') || readCookie('web_seo_current_org');
       if (savedOrg) {
-        this.organizationId = parseInt(savedOrg, 10);
+        const parsed = parseInt(savedOrg, 10);
+        if (!Number.isNaN(parsed)) {
+          this.organizationId = parsed;
+        }
       }
     }
   }
@@ -27,17 +58,22 @@ class ApiClient {
   public setToken(token: string | null) {
     this.token = token;
     if (typeof window !== 'undefined') {
-      if (token) {
-        localStorage.setItem('web_seo_token', token);
-      } else {
-        localStorage.removeItem('web_seo_token');
+      try {
+        if (token) {
+          localStorage.setItem('web_seo_token', token);
+        } else {
+          localStorage.removeItem('web_seo_token');
+        }
+      } catch {
+        // ignore storage restrictions
       }
+      writePersistentCookie('web_seo_token', token);
     }
   }
 
   public getToken(): string | null {
     if (!this.token && typeof window !== 'undefined') {
-      this.token = localStorage.getItem('web_seo_token');
+      this.token = localStorage.getItem('web_seo_token') || readCookie('web_seo_token');
     }
     return this.token;
   }
@@ -45,19 +81,27 @@ class ApiClient {
   public setOrganizationId(orgId: number | null) {
     this.organizationId = orgId;
     if (typeof window !== 'undefined') {
-      if (orgId) {
-        localStorage.setItem('web_seo_current_org', orgId.toString());
-      } else {
-        localStorage.removeItem('web_seo_current_org');
+      try {
+        if (orgId) {
+          localStorage.setItem('web_seo_current_org', orgId.toString());
+        } else {
+          localStorage.removeItem('web_seo_current_org');
+        }
+      } catch {
+        // ignore storage restrictions
       }
+      writePersistentCookie('web_seo_current_org', orgId ? orgId.toString() : null);
     }
   }
 
   public getOrganizationId(): number | null {
     if (!this.organizationId && typeof window !== 'undefined') {
-      const saved = localStorage.getItem('web_seo_current_org');
+      const saved = localStorage.getItem('web_seo_current_org') || readCookie('web_seo_current_org');
       if (saved) {
-        this.organizationId = parseInt(saved, 10);
+        const parsed = parseInt(saved, 10);
+        if (!Number.isNaN(parsed)) {
+          this.organizationId = parsed;
+        }
       }
     }
     return this.organizationId;
@@ -91,7 +135,7 @@ class ApiClient {
     };
 
     const isIdempotent = !options.method || options.method === 'GET';
-    const maxAttempts = isIdempotent ? 2 : 1;
+    const maxAttempts = isIdempotent ? 3 : 1;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
@@ -100,24 +144,31 @@ class ApiClient {
           headers,
         });
 
-        // Retry once on transient cold-start 502/503/504 for GET requests
+        // Retry on transient serverless/DB cold-start 502/503/504 for GET requests
         if (isIdempotent && attempt < maxAttempts && [502, 503, 504].includes(res.status)) {
-          await new Promise((r) => setTimeout(r, 800));
+          await new Promise((r) => setTimeout(r, attempt * 900));
           continue;
         }
 
         const data: ApiResponse<T> = await res.json().catch(() => ({
           success: false,
           error: {
-            code: 'NETWORK_OR_PARSING_ERROR',
+            code: res.status === 401 ? 'UNAUTHENTICATED' : 'NETWORK_OR_PARSING_ERROR',
             message: `Server returned HTTP ${res.status} with invalid JSON.`,
           },
         }));
 
+        if (!data.success && !data.error?.code && res.status === 401) {
+          data.error = {
+            code: 'UNAUTHENTICATED',
+            message: data.error?.message || 'Session expired. Please sign in again.',
+          };
+        }
+
         return data;
       } catch (err: unknown) {
         if (attempt < maxAttempts) {
-          await new Promise((r) => setTimeout(r, 800));
+          await new Promise((r) => setTimeout(r, attempt * 900));
           continue;
         }
         return {
