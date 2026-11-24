@@ -20,6 +20,7 @@ use App\Http\Controllers\Api\V1\ClientManagementController;
 use App\Http\Controllers\Api\V1\CompetitorAnalysisController;
 use App\Http\Controllers\Api\V1\LiveTrafficController;
 use App\Http\Controllers\Api\V1\RankCheckerController;
+use App\Http\Controllers\Api\V1\ReportController;
 use App\Http\Controllers\Api\V1\WhiteLabelReportController;
 use Illuminate\Support\Facades\Route;
 
@@ -272,6 +273,10 @@ Route::prefix('v1')->group(function () {
             Route::put('/white-label/branding', [WhiteLabelReportController::class, 'updateBranding'])
                 ->middleware('org.role:admin');
             Route::get('/websites/{website}/reports/white-label', [WhiteLabelReportController::class, 'getReport']);
+
+            // Comprehensive Platform Reporting & PDF/CSV Exports (All Modules)
+            Route::get('/websites/{website}/reports/bundle', [ReportController::class, 'bundle']);
+            Route::get('/websites/{website}/reports/export/csv', [ReportController::class, 'exportCsv']);
 
             // Phase 7: Organization & Account Deletion Workflow
             Route::post('/organizations/current/delete', [OrganizationController::class, 'destroyOrganization'])

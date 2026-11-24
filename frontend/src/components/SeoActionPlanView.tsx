@@ -28,6 +28,7 @@ import { Website, AiRecommendation, CmsChangeRequest, CmsSnapshot } from '@/type
 import { api } from '@/lib/api';
 import { useToast } from '@/context/ToastContext';
 import { ContextProfileModal } from './ContextProfileModal';
+import { QuickExportButtons } from './QuickExportButtons';
 
 interface SeoActionPlanViewProps {
   website: Website | null;
@@ -445,6 +446,13 @@ export function SeoActionPlanView({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          <QuickExportButtons
+            website={website}
+            section="action_plan"
+            csvDataset="action_plan"
+            reportTitle="SEO Action Plan & AI Recommendations"
+            filenamePrefix="seo-action-plan"
+          />
           <button
             onClick={() => setIsProfileModalOpen(true)}
             className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-zinc-300 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-xl transition"

@@ -32,6 +32,7 @@ import { CrawlProgressModal } from './CrawlProgressModal';
 import { AuditCompareModal } from './AuditCompareModal';
 import { AuditIssuesTable } from './AuditIssuesTable';
 import { CrawledPagesTable } from './CrawledPagesTable';
+import { QuickExportButtons } from './QuickExportButtons';
 
 interface AuditOverviewViewProps {
   website: Website | null;
@@ -249,6 +250,13 @@ export function AuditOverviewView({ website, onRefreshWebsites, onNavigateToStra
             <span>Compare Runs</span>
           </button>
 
+          <QuickExportButtons
+            website={website}
+            section="site_audit"
+            csvDataset="audit_issues"
+            reportTitle="Technical Site Audit & Issues Report"
+            filenamePrefix="site-audit"
+          />
           <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden">
             <button
               onClick={() => handleExport('csv')}

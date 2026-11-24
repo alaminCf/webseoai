@@ -27,10 +27,14 @@ import {
   X,
   KeyRound,
   Trash2,
+  FileDown,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { Website } from '@/types';
 import { api } from '@/lib/api';
 import { useToast } from '@/context/ToastContext';
+import { downloadLiveSerpCsv, downloadLiveSerpPdf } from '@/lib/reportPdf';
+import { QuickExportButtons } from './QuickExportButtons';
 import {
   ALL_COUNTRIES,
   ALL_LANGUAGES,
@@ -581,6 +585,16 @@ export function RankCheckerView({
             <p className="text-xs text-zinc-400 mt-1 max-w-3xl">
               Simulate an unpersonalized Google search from Singapore, Bangladesh, USA, UK, or any of 195 countries on Desktop or Mobile. Inspect Google Pages 1–10, Maps Local Pack, and verify your live rank against your 28-day Search Console average.
             </p>
+          </div>
+          <div className="shrink-0">
+            <QuickExportButtons
+              website={website}
+              section="rank_checker"
+              csvDataset="rank_checker"
+              reportTitle="Geo-Located Live Google Rank Report"
+              filenamePrefix="rank-checker"
+              compact
+            />
           </div>
         </div>
 
@@ -1204,6 +1218,30 @@ export function RankCheckerView({
                     <ExternalLink className="w-3.5 h-3.5" />
                     Open on Google ({result.country})
                   </a>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const f = downloadLiveSerpPdf(result);
+                      toast.success(`Downloaded SERP PDF: ${f}`);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 font-semibold transition"
+                  >
+                    <FileDown className="w-3.5 h-3.5" />
+                    SERP PDF
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const f = downloadLiveSerpCsv(result);
+                      toast.success(`Downloaded SERP CSV: ${f}`);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 font-semibold transition"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5 text-sky-400" />
+                    SERP CSV
+                  </button>
                 </div>
 
                 <div className="text-[11px] text-zinc-500 flex items-center gap-1.5">

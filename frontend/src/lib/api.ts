@@ -167,6 +167,52 @@ class ApiClient {
   public delete<T>(endpoint: string): Promise<ApiResponse<T>> {
     return this.request<T>(endpoint, { method: 'DELETE' });
   }
+
+  /**
+   * Download an authenticated binary/text file (e.g. CSV export) directly from the backend API.
+   */
+  public async downloadFile(endpoint: string, fallbackFilename: string): Promise<{ ok: boolean; filename?: string; error?: string }> {
+    const url = `${getApiBaseUrl()}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+    const headers: Record<string, string> = {
+      Accept: 'text/csv, application/octet-stream, application/json',
+    };
+    const token = this.getToken();
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const orgId = this.getOrganizationId();
+    if (orgId) headers['X-Organization-Id'] = orgId.toString();
+
+    try {
+      const res = await fetch(url, { method: 'GET', headers });
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => null);
+        return {
+          ok: false,
+          error: errJson?.error?.message || errJson?.message || `Download failed (HTTP ${res.status}).`,
+        };
+      }
+
+      const blob = await res.blob();
+      const disp = res.headers.get('content-disposition') || '';
+      const match = disp.match(/filename="?([^"]+)"?/i);
+      const filename = match?.[1] || fallbackFilename;
+
+      const blobUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => window.URL.revokeObjectURL(blobUrl), 1500);
+
+      return { ok: true, filename };
+    } catch (err: unknown) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : 'Network error downloading report.',
+      };
+    }
+  }
 }
 
 export const api = new ApiClient();

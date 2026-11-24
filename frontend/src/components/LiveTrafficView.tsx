@@ -33,6 +33,7 @@ import { Website } from '@/types';
 import { api } from '@/lib/api';
 import { countryFlag } from '@/lib/countries';
 import { useToast } from '@/context/ToastContext';
+import { QuickExportButtons } from './QuickExportButtons';
 
 interface LiveTrafficViewProps {
   website: Website;
@@ -369,6 +370,16 @@ export function LiveTrafficView({ website }: LiveTrafficViewProps) {
             <Code2 className="w-3.5 h-3.5 text-sky-400" />
             <span>{showSetup ? 'Hide Setup' : 'Data Sources & Setup'}</span>
           </button>
+
+          <QuickExportButtons
+            website={website}
+            section="live_traffic"
+            csvDataset="live_traffic"
+            reportTitle="Audience Live Traffic & Geo Report"
+            filenamePrefix="live-traffic"
+            range={range === '7d' ? '7d' : '30d'}
+            compact
+          />
 
           <button
             type="button"

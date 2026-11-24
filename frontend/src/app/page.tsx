@@ -28,6 +28,7 @@ import { AuditOverviewView } from '@/components/AuditOverviewView';
 import { CompetitorAnalysisView } from '@/components/competitors/CompetitorAnalysisView';
 import { ContentStudioView } from '@/components/ContentStudioView';
 import { RankCheckerView } from '@/components/RankCheckerView';
+import { ReportsCenterView } from '@/components/ReportsCenterView';
 import { UnifiedPerformanceView } from '@/components/UnifiedPerformanceView';
 import { AutopilotView } from '@/components/AutopilotView';
 import { UnifiedSettingsView } from '@/components/UnifiedSettingsView';
@@ -62,7 +63,7 @@ export default function DashboardPage() {
     const reason = params.get('reason');
     const websiteIdParam = params.get('website_id');
 
-    const validTabs = ['overview', 'websites', 'action_plan', 'audits', 'competitors', 'content', 'rank_checker', 'live_traffic', 'performance', 'autopilot', 'team', 'settings'];
+    const validTabs = ['overview', 'websites', 'action_plan', 'audits', 'competitors', 'content', 'rank_checker', 'live_traffic', 'performance', 'reports', 'autopilot', 'team', 'settings'];
     if (tab && validTabs.includes(tab)) {
       setActiveTab(tab);
     }
@@ -346,6 +347,11 @@ export default function DashboardPage() {
                 setActiveTab('rank_checker');
               }}
             />
+          )}
+
+          {/* SECTION 6B: EXECUTIVE REPORTS & EXPORTS (PDF / CSV) */}
+          {activeTab === 'reports' && (
+            <ReportsCenterView website={selectedWebsite} />
           )}
 
           {/* SECTION 7: AUTOPILOT */}

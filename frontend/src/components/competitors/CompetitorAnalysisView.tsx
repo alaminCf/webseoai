@@ -19,6 +19,7 @@ import { api } from '@/lib/api';
 import { ALL_LANGUAGES } from '@/lib/countries';
 import { useToast } from '@/context/ToastContext';
 import { CountryMultiSelect } from './CountryMultiSelect';
+import { QuickExportButtons } from '../QuickExportButtons';
 import { CompetitorOverviewTab, MyCompetitorsTab } from './CompetitorDiscoveryAndListTabs';
 import { CompetitorDeepDivePanel } from './CompetitorDeepDivePanel';
 import { DomainComparisonTab, KeywordGapTab, ContentGapTab } from './DomainComparisonAndGapsTabs';
@@ -173,6 +174,15 @@ export function CompetitorAnalysisView({
               </option>
             ))}
           </select>
+
+          <QuickExportButtons
+            website={website}
+            section="competitors"
+            csvDataset="competitors"
+            reportTitle="Competitor Intelligence & Gap Analysis Report"
+            filenamePrefix="competitor-analysis"
+            compact
+          />
 
           <button
             onClick={handleLaunchFullAnalysis}

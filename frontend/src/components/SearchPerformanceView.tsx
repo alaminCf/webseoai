@@ -30,6 +30,7 @@ import {
 import { Website, SearchConsoleStatus, SearchPerformanceData } from '@/types';
 import { api } from '@/lib/api';
 import { useToast } from '@/context/ToastContext';
+import { QuickExportButtons } from './QuickExportButtons';
 
 interface SearchPerformanceViewProps {
   website: Website | null;
@@ -381,6 +382,15 @@ export function SearchPerformanceView({
                   {status.latest_sync_log?.rows_synced || 0}
                 </span>
               </div>
+              <QuickExportButtons
+                website={website}
+                section="search_console"
+                csvDataset="gsc_queries"
+                reportTitle="Google Search Console Performance Report"
+                filenamePrefix="search-console"
+                range={dateRange === '3m' ? '90d' : dateRange}
+                compact
+              />
             </div>
           </div>
 

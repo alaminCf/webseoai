@@ -20,6 +20,7 @@ import {
   Target,
   Radio,
   Crosshair,
+  FileDown,
 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { ThemeToggle } from './ThemeToggle';
@@ -53,6 +54,7 @@ export function Sidebar({
     { id: 'rank_checker', label: 'Rank Checker', icon: Crosshair, badge: 'SERP' },
     { id: 'live_traffic', label: 'Live Traffic', icon: Radio, badge: 'LIVE' },
     { id: 'performance', label: 'Performance', icon: BarChart3 },
+    { id: 'reports', label: 'Reports & Export', icon: FileDown, badge: 'PDF/CSV' },
     { id: 'autopilot', label: 'Autopilot', icon: Zap },
     { id: 'team', label: 'Clients & Team', icon: Users },
     { id: 'settings', label: 'Settings', icon: Settings },

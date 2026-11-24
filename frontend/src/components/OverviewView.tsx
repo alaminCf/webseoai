@@ -20,6 +20,7 @@ import {
   Target,
   FileText,
   Zap,
+  FileDown,
 } from 'lucide-react';
 import { Website, AiRecommendation, AuditRun } from '@/types';
 import { api } from '@/lib/api';
@@ -253,7 +254,15 @@ export function OverviewView({
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5 shrink-0">
+        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          <button
+            onClick={() => onNavigate('reports')}
+            className="inline-flex items-center gap-2 px-3.5 py-2.5 bg-zinc-900/90 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 font-semibold rounded-xl text-xs transition"
+            title="Download Executive PDF & CSV SEO Reports"
+          >
+            <FileDown className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Reports (PDF/CSV)</span>
+          </button>
           <button
             onClick={() => onNavigate('live_traffic')}
             className="inline-flex items-center gap-2 px-3.5 py-2.5 bg-zinc-900/90 hover:bg-zinc-800 border border-emerald-500/30 text-emerald-400 font-semibold rounded-xl text-xs transition"
