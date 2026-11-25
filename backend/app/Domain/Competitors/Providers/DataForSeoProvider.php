@@ -3,12 +3,14 @@
 namespace App\Domain\Competitors\Providers;
 
 use App\Domain\Competitors\Contracts\CompetitorProviderInterface;
+use App\Models\PlatformApiKey;
 use Illuminate\Support\Facades\Http;
 use Throwable;
 
 /**
  * Unified DataForSEO v3 adapter covering Domain Metrics, Competitor Discovery,
  * Ranked Keywords, Backlinks, and Live Google Organic SERP.
+ * Resolves credentials from environment variables OR Super Admin encrypted PlatformApiKey.
  */
 class DataForSeoProvider implements CompetitorProviderInterface
 {
@@ -19,10 +21,92 @@ class DataForSeoProvider implements CompetitorProviderInterface
 
     public function __construct()
     {
-        $this->login = trim((string) config('competitors.providers.dataforseo.login', ''));
-        $this->password = trim((string) config('competitors.providers.dataforseo.password', ''));
+        $creds = self::resolveCredentials();
+        $this->login = $creds['login'];
+        $this->password = $creds['password'];
         $this->baseUrl = rtrim((string) config('competitors.providers.dataforseo.base_url', 'https://api.dataforseo.com/v3'), '/');
         $this->timeout = (int) config('competitors.http_timeout_seconds', 15);
+    }
+
+    /**
+     * Resolve DataForSEO login & password from config/env first, then Admin Panel encrypted storage.
+     *
+     * @return array{login: string, password: string, source: string}
+     */
+    public static function resolveCredentials(): array
+    {
+        $envLogin = trim((string) config('competitors.providers.dataforseo.login', ''));
+        $envPass = trim((string) config('competitors.providers.dataforseo.password', ''));
+        if ($envLogin !== '' && $envPass !== '') {
+            return ['login' => $envLogin, 'password' => $envPass, 'source' => 'server_env'];
+        }
+
+        try {
+            $key = PlatformApiKey::where('provider', 'dataforseo')
+                ->where('status', PlatformApiKey::STATUS_ACTIVE)
+                ->orderBy('priority')
+                ->orderBy('id')
+                ->first();
+
+            if ($key) {
+                $decoded = json_decode($key->getDecryptedKey(), true);
+                if (is_array($decoded) && !empty($decoded['login']) && !empty($decoded['password'])) {
+                    return [
+                        'login' => trim((string) $decoded['login']),
+                        'password' => trim((string) $decoded['password']),
+                        'source' => 'admin_panel',
+                    ];
+                }
+            }
+        } catch (Throwable) {
+            // Table may not exist during early boot
+        }
+
+        return ['login' => '', 'password' => '', 'source' => 'unconfigured'];
+    }
+
+    /**
+     * Verify DataForSEO credentials via the free /appendix/user_data endpoint (costs $0.00).
+     */
+    public function verifyCredentials(string $login, string $password): array
+    {
+        $cleanLogin = trim($login);
+        $cleanPass = trim($password);
+        if ($cleanLogin === '' || $cleanPass === '') {
+            return ['valid' => false, 'error' => 'Both DataForSEO login email and API password are required.'];
+        }
+
+        try {
+            $res = Http::withBasicAuth($cleanLogin, $cleanPass)
+                ->timeout(12)
+                ->acceptJson()
+                ->get($this->baseUrl . '/appendix/user_data');
+
+            if (!$res->successful()) {
+                return [
+                    'valid' => false,
+                    'error' => "DataForSEO rejected credentials (HTTP {$res->status()}). Check your API Login & API Password at app.dataforseo.com.",
+                ];
+            }
+
+            $statusCode = (int) ($res->json('status_code') ?? 0);
+            if ($statusCode !== 20000) {
+                $msg = (string) ($res->json('status_message') ?? 'Invalid DataForSEO credentials.');
+                return ['valid' => false, 'error' => "DataForSEO verification failed: {$msg}"];
+            }
+
+            $money = $res->json('tasks.0.result.0.money') ?? [];
+            return [
+                'valid' => true,
+                'balance' => isset($money['balance']) ? round((float) $money['balance'], 4) : null,
+                'total_deposited' => isset($money['total']) ? round((float) $money['total'], 4) : null,
+            ];
+        } catch (Throwable $e) {
+            return [
+                'valid' => false,
+                'error' => 'Could not reach DataForSEO API: ' . $e->getMessage(),
+            ];
+        }
     }
 
     public function getName(): string
@@ -37,8 +121,9 @@ class DataForSeoProvider implements CompetitorProviderInterface
 
     public function isConfigured(): bool
     {
-        $this->login = trim((string) config('competitors.providers.dataforseo.login', ''));
-        $this->password = trim((string) config('competitors.providers.dataforseo.password', ''));
+        $creds = self::resolveCredentials();
+        $this->login = $creds['login'];
+        $this->password = $creds['password'];
         return $this->login !== '' && $this->password !== '';
     }
 

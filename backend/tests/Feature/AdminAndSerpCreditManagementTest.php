@@ -281,4 +281,98 @@ class AdminAndSerpCreditManagementTest extends TestCase
 
         $this->assertEquals(0, GlobalSerpCache::count());
     }
+
+    public function test_admin_can_connect_dataforseo_and_serper_powers_live_keyword_gap(): void
+    {
+        // 1. Live Serper.dev fallback populates competitor rankings in Keyword Gap even without DataForSEO
+        PlatformApiKey::create([
+            'provider' => 'serper',
+            'label' => 'Pool Key for Keyword Gap',
+            'encrypted_key' => PlatformApiKey::encryptKey('serper_kw_gap_key_1'),
+            'key_hint' => '••••y_1',
+            'priority' => 1,
+            'status' => PlatformApiKey::STATUS_ACTIVE,
+            'monthly_limit' => 2500,
+        ]);
+
+        \App\Models\CompetitorDomain::create([
+            'organization_id' => $this->orgA->id,
+            'website_id' => $this->siteA->id,
+            'domain' => 'rivalplumber.sg',
+            'category' => 'direct',
+            'tier' => 'primary',
+            'country' => 'SG',
+            'language' => 'en',
+            'is_active' => true,
+        ]);
+
+        \App\Models\SearchPerformanceRecord::create([
+            'organization_id' => $this->orgA->id,
+            'website_id' => $this->siteA->id,
+            'property_id' => 'https://alphaplumbing.sg/',
+            'date' => now()->subDays(2)->toDateString(),
+            'page' => 'https://alphaplumbing.sg/emergency',
+            'query' => 'emergency plumber singapore',
+            'country' => 'SGP',
+            'device' => 'MOBILE',
+            'clicks' => 5,
+            'impressions' => 300,
+            'ctr' => 0.0167,
+            'position' => 12.0,
+        ]);
+
+        Http::fake([
+            'https://google.serper.dev/search' => Http::response([
+                'organic' => [
+                    ['position' => 2, 'link' => 'https://rivalplumber.sg/24hr', 'title' => 'Rival Plumber SG', 'snippet' => '24hr'],
+                    ['position' => 9, 'link' => 'https://alphaplumbing.sg/emergency', 'title' => 'Alpha Plumbing SG', 'snippet' => 'Fast'],
+                ],
+                'peopleAlsoAsk' => [['question' => 'Cost of plumber?']],
+            ], 200),
+            'https://api.dataforseo.com/v3/appendix/user_data' => Http::response([
+                'status_code' => 20000,
+                'tasks' => [
+                    ['result' => [['money' => ['balance' => 14.25, 'total' => 50.0]]]],
+                ],
+            ], 200),
+        ]);
+
+        $syncRes = app(\App\Domain\Competitors\Services\KeywordGapService::class)
+            ->syncKeywordGap($this->siteA, null, 'SG', 'en');
+
+        $this->assertEquals(1, $syncRes['keywords_synced']);
+
+        $kwGapRes = $this->actingAs($this->regularUserA)
+            ->withHeaders(['X-Organization-Id' => (string) $this->orgA->id])
+            ->getJson("/api/v1/websites/{$this->siteA->id}/competitors/keyword-gap");
+
+        $kwGapRes->assertOk()
+            ->assertJsonPath('meta.serp_provider_connected', true)
+            ->assertJsonPath('data.0.keyword', 'emergency plumber singapore')
+            ->assertJsonPath('data.0.data_source', 'gsc+serper_live');
+
+        $compPositions = $kwGapRes->json('data.0.competitor_positions');
+        $this->assertEquals(1, $compPositions['rivalplumber.sg']['position'] ?? null);
+
+        // 2. Super Admin connects DataForSEO v3 credentials (live-verified via /appendix/user_data)
+        $dfsSave = $this->actingAs($this->superAdmin)
+            ->postJson('/api/v1/admin/dataforseo', [
+                'login' => 'seo@techboloy.com',
+                'password' => 'dfs_secret_password_123',
+            ]);
+
+        $dfsSave->assertStatus(201)
+            ->assertJsonPath('data.configured', true)
+            ->assertJsonPath('data.balance', 14.25);
+
+        $this->assertTrue((new \App\Domain\Competitors\Providers\DataForSeoProvider())->isConfigured());
+
+        // 3. Super Admin disconnects DataForSEO cleanly
+        $this->actingAs($this->superAdmin)
+            ->deleteJson('/api/v1/admin/dataforseo')
+            ->assertOk()
+            ->assertJsonPath('data.configured', false);
+
+        $this->assertFalse((new \App\Domain\Competitors\Providers\DataForSeoProvider())->isConfigured());
+    }
 }

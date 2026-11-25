@@ -294,6 +294,98 @@ class AdminController extends Controller
     }
 
     /**
+     * Get DataForSEO v3 platform-wide credentials status (for Search Volume, KD, CPC & Backlinks).
+     */
+    public function getDataForSeo(): JsonResponse
+    {
+        $creds = \App\Domain\Competitors\Providers\DataForSeoProvider::resolveCredentials();
+        $dbRow = PlatformApiKey::where('provider', 'dataforseo')
+            ->where('status', PlatformApiKey::STATUS_ACTIVE)
+            ->orderBy('priority')
+            ->orderBy('id')
+            ->first();
+
+        return $this->success([
+            'configured' => $creds['login'] !== '' && $creds['password'] !== '',
+            'source' => $creds['source'],
+            'login_hint' => $creds['login'] !== '' ? $creds['login'] : null,
+            'updated_at' => $dbRow?->updated_at?->toIso8601String(),
+            'last_error' => $dbRow?->last_error,
+        ]);
+    }
+
+    /**
+     * Live-verify and save encrypted platform-wide DataForSEO v3 credentials.
+     */
+    public function saveDataForSeo(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'login' => ['required', 'string', 'min:3', 'max:255'],
+            'password' => ['required', 'string', 'min:6', 'max:255'],
+            'skip_verify' => ['nullable', 'boolean'],
+        ]);
+
+        $login = trim($validated['login']);
+        $password = trim($validated['password']);
+        $balance = null;
+
+        if (empty($validated['skip_verify'])) {
+            $provider = new \App\Domain\Competitors\Providers\DataForSeoProvider();
+            $check = $provider->verifyCredentials($login, $password);
+            if (!($check['valid'] ?? false)) {
+                return $this->error(
+                    $check['error'] ?? 'Could not verify DataForSEO credentials.',
+                    'DATAFORSEO_INVALID',
+                    null,
+                    422
+                );
+            }
+            $balance = $check['balance'] ?? null;
+        }
+
+        // Replace any existing active admin DataForSEO row cleanly
+        PlatformApiKey::where('provider', 'dataforseo')->delete();
+
+        $key = PlatformApiKey::create([
+            'provider' => 'dataforseo',
+            'label' => 'DataForSEO v3 Platform Account',
+            'encrypted_key' => PlatformApiKey::encryptKey(json_encode([
+                'login' => $login,
+                'password' => $password,
+            ])),
+            'key_hint' => $login,
+            'priority' => 1,
+            'status' => PlatformApiKey::STATUS_ACTIVE,
+            'monthly_limit' => 100000,
+            'credits_used' => 0,
+            'total_requests' => 0,
+            'created_by_user_id' => $request->user()->id,
+        ]);
+
+        return $this->success([
+            'message' => 'DataForSEO v3 verified and activated across all workspaces (Search Volume, KD, CPC & Backlinks unlocked).',
+            'configured' => true,
+            'source' => 'admin_panel',
+            'login_hint' => $login,
+            'balance' => $balance,
+            'key_id' => $key->id,
+        ], null, 201);
+    }
+
+    /**
+     * Disconnect Admin Panel DataForSEO v3 credentials.
+     */
+    public function deleteDataForSeo(): JsonResponse
+    {
+        PlatformApiKey::where('provider', 'dataforseo')->delete();
+
+        return $this->success([
+            'message' => 'DataForSEO credentials disconnected.',
+            'configured' => \App\Domain\Competitors\Providers\DataForSeoProvider::resolveCredentials()['login'] !== '',
+        ]);
+    }
+
+    /**
      * Get all platform settings (plan quotas, smart cache config, registration controls).
      */
     public function getSettings(): JsonResponse

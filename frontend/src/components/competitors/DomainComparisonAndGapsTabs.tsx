@@ -515,12 +515,21 @@ export function KeywordGapTab({
 
       {/* Honest Provider Attribution Banner */}
       {meta && !meta.provider_connected && (
-        <div className="p-3 rounded-xl bg-amber-950/20 border border-amber-800/40 text-xs text-amber-300 flex items-center gap-2">
-          <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
-          <span>
-            External keyword provider (DataForSEO / Semrush) is not connected. Showing verified first-party GSC queries only ({country}/{language}); third-party search volume &amp; competitor rankings show &ldquo;Data unavailable&rdquo;.
-          </span>
-        </div>
+        meta.serp_provider_connected ? (
+          <div className="p-3 rounded-xl bg-emerald-950/20 border border-emerald-800/40 text-xs text-emerald-300 flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+            <span>
+              <strong>Live Google SERP Keyword Gap Active</strong> ({country}/{language}): Real competitor Google rankings &amp; verified GSC queries are powered by our built-in Search Engine + Smart Cache. Optional: connect DataForSEO in Admin Panel to also populate monthly Search Volume, KD &amp; CPC.
+            </span>
+          </div>
+        ) : (
+          <div className="p-3 rounded-xl bg-amber-950/20 border border-amber-800/40 text-xs text-amber-300 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+            <span>
+              External keyword provider (DataForSEO / Semrush) is not connected. Showing verified first-party GSC queries only ({country}/{language}); third-party search volume &amp; competitor rankings show &ldquo;Data unavailable&rdquo;.
+            </span>
+          </div>
+        )
       )}
 
       {/* Keyword Gap Table */}

@@ -3,6 +3,9 @@
 namespace App\Domain\Competitors\Services;
 
 use App\Domain\Competitors\CompetitorProviderManager;
+use App\Domain\Competitors\Providers\SerperProvider;
+use App\Domain\Competitors\Support\CountryCatalog;
+use App\Domain\RankChecker\SerpCreditService;
 use App\Models\AiRecommendation;
 use App\Models\CompetitorDomain;
 use App\Models\CompetitorKeyword;
@@ -12,8 +15,10 @@ use Illuminate\Support\Collection;
 
 class KeywordGapService
 {
-    public function __construct(private CompetitorProviderManager $providerManager)
-    {
+    public function __construct(
+        private CompetitorProviderManager $providerManager,
+        private SerpCreditService $serpCreditService
+    ) {
     }
 
     /**
@@ -44,11 +49,11 @@ class KeywordGapService
         // Map keyword (lowercased) => merged record
         $merged = [];
 
-        // 1. Seed verified first-party target rankings from Google Search Console (if present)
+        // 1. Seed verified first-party target rankings from Google Search Console (impression-weighted position)
         $gscQueries = SearchPerformanceRecord::where('website_id', $website->id)
-            ->where('date', '>=', now()->subDays(28)->toDateString())
+            ->where('date', '>=', now()->subDays(31)->toDateString())
             ->select('query', 'page')
-            ->selectRaw('AVG(position) as avg_pos, SUM(impressions) as total_imp')
+            ->selectRaw('CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions * 1.0) / SUM(impressions) ELSE 0 END as avg_pos, SUM(impressions) as total_imp')
             ->whereNotNull('query')
             ->where('query', '!=', '')
             ->groupBy('query', 'page')
@@ -157,6 +162,142 @@ class KeywordGapService
                         'position' => $item['position'] ?? null,
                         'url' => $item['url'] ?? null,
                     ];
+                }
+            }
+        } else {
+            // 2B. Built-in Live SERP Fallback (Serper.dev + Smart Cross-User Cache):
+            // When DataForSEO/Semrush is not configured, check live Google Top 30 SERPs for the top keywords
+            // so users STILL get real competitor Google rankings (#1..#30) and Missing/Weak/Strong gap analysis!
+            $serpProvider = $this->providerManager->resolveForCapability('serp', $website->organization_id);
+            if ($serpProvider->getName() !== 'first_party_crawl' && $competitors->isNotEmpty()) {
+                $seedKeywords = array_slice(array_keys($merged), 0, 8);
+
+                // Also add up to 4 competitor-discovered / niche keywords so sites without GSC get Missing gaps
+                foreach ($competitors as $comp) {
+                    $metaMatched = $comp->discovery_metadata['matched_queries'] ?? [];
+                    if (is_array($metaMatched)) {
+                        foreach ($metaMatched as $mq) {
+                            $mqKey = strtolower(trim((string) $mq));
+                            if ($mqKey !== '' && !in_array($mqKey, $seedKeywords, true) && count($seedKeywords) < 12) {
+                                $seedKeywords[] = $mqKey;
+                                if (!isset($merged[$mqKey])) {
+                                    $merged[$mqKey] = [
+                                        'keyword' => trim((string) $mq),
+                                        'search_volume' => null,
+                                        'keyword_difficulty' => null,
+                                        'cpc' => null,
+                                        'search_intent' => $this->inferIntent($mqKey),
+                                        'target_position' => null,
+                                        'target_url' => null,
+                                        'competitor_positions' => [],
+                                        'serp_features' => [],
+                                        'data_source' => 'serper_live_serp',
+                                        'data_classification' => 'live_serp',
+                                    ];
+                                }
+                            }
+                        }
+                    }
+                }
+
+                $countryName = CountryCatalog::name($country);
+                $compDomains = $competitors->pluck('domain')->map(fn ($d) => CompetitorDomain::normalizeDomain($d))->values()->all();
+
+                foreach ($seedKeywords as $kwKey) {
+                    $kwText = $merged[$kwKey]['keyword'] ?? $kwKey;
+                    $serpRes = null;
+
+                    if (!$forceRefresh) {
+                        $cached = $this->serpCreditService->lookupGlobalCache($kwText, $country, $language, 'desktop', $countryName, 30);
+                        if ($cached) {
+                            $decoded = $cached->getDecodedPayload();
+                            if (!empty($decoded['available'])) {
+                                $serpRes = $decoded;
+                            }
+                        }
+                    }
+
+                    if ($serpRes === null) {
+                        // Respect workspace SERP quota before making live calls
+                        $org = $website->organization;
+                        if ($org && $this->serpCreditService->getQuotaStatus($org)['exceeded']) {
+                            break;
+                        }
+
+                        if ($serpProvider instanceof SerperProvider) {
+                            $serpRes = $serpProvider->fetchSerp($kwText, $country, $language, 'desktop', $countryName, 30);
+                        } else {
+                            $serpRes = $serpProvider->fetchSerp($kwText, $country, $language, 'desktop', $countryName);
+                        }
+
+                        if (!empty($serpRes['available'])) {
+                            $pagesFetched = max(1, (int) ($serpRes['pages_fetched'] ?? 1));
+                            $this->serpCreditService->storeGlobalCache(
+                                $serpProvider->getName(),
+                                $kwText,
+                                $country,
+                                $language,
+                                'desktop',
+                                $countryName,
+                                min(30, max(10, $pagesFetched * 10)),
+                                $serpRes,
+                                $pagesFetched
+                            );
+                            $this->serpCreditService->recordUsage(
+                                $website,
+                                null,
+                                isset($serpRes['platform_api_key_id']) ? (int) $serpRes['platform_api_key_id'] : null,
+                                $serpProvider->getName(),
+                                $kwText,
+                                $country,
+                                30,
+                                $pagesFetched,
+                                false,
+                                (string) ($serpRes['key_source'] ?? 'platform_pool')
+                            );
+                        }
+                    }
+
+                    if (empty($serpRes['available'])) {
+                        continue;
+                    }
+
+                    if (!empty($serpRes['serp_features'])) {
+                        $merged[$kwKey]['serp_features'] = $serpRes['serp_features'];
+                    }
+
+                    foreach ($serpRes['organic_results'] ?? [] as $idx => $orgRow) {
+                        $resDomain = CompetitorDomain::normalizeDomain((string) ($orgRow['domain'] ?? ($orgRow['url'] ?? '')));
+                        $pos = (int) ($orgRow['position'] ?? ($idx + 1));
+                        if ($resDomain === '') {
+                            continue;
+                        }
+
+                        if ($resDomain === $targetDomain || str_ends_with($resDomain, '.' . $targetDomain)) {
+                            if ($merged[$kwKey]['target_position'] === null || $pos < $merged[$kwKey]['target_position']) {
+                                $merged[$kwKey]['target_position'] = $pos;
+                                $merged[$kwKey]['target_url'] = (string) ($orgRow['url'] ?? $merged[$kwKey]['target_url']);
+                            }
+                        }
+
+                        foreach ($compDomains as $cd) {
+                            if ($resDomain === $cd || str_ends_with($resDomain, '.' . $cd)) {
+                                if (!isset($merged[$kwKey]['competitor_positions'][$cd])) {
+                                    $merged[$kwKey]['competitor_positions'][$cd] = [
+                                        'position' => $pos,
+                                        'url' => (string) ($orgRow['url'] ?? ''),
+                                    ];
+                                }
+                            }
+                        }
+                    }
+
+                    if (!empty($merged[$kwKey]['competitor_positions'])) {
+                        $merged[$kwKey]['data_source'] = $merged[$kwKey]['data_source'] === 'first_party_gsc'
+                            ? 'gsc+serper_live'
+                            : 'serper_live_serp';
+                        $merged[$kwKey]['data_classification'] = 'hybrid';
+                    }
                 }
             }
         }

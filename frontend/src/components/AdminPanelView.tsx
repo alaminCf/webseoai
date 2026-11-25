@@ -49,6 +49,12 @@ export function AdminPanelView() {
   const [newKeyLimit, setNewKeyLimit] = useState(2500);
   const [isAddingKey, setIsAddingKey] = useState(false);
 
+  // DataForSEO v3 state
+  const [dfsStatus, setDfsStatus] = useState<any>(null);
+  const [dfsLogin, setDfsLogin] = useState('');
+  const [dfsPassword, setDfsPassword] = useState('');
+  const [isSavingDfs, setIsSavingDfs] = useState(false);
+
   // Settings state
   const [settings, setSettings] = useState<any>(null);
   const [cacheStats, setCacheStats] = useState<any>(null);
@@ -81,8 +87,12 @@ export function AdminPanelView() {
   const loadKeys = useCallback(async () => {
     setIsLoading(true);
     try {
-      const res = await api.get<any>('/admin/serp-keys');
+      const [res, dfsRes] = await Promise.all([
+        api.get<any>('/admin/serp-keys'),
+        api.get<any>('/admin/dataforseo'),
+      ]);
       if (res.success && res.data) setKeysData(res.data);
+      if (dfsRes.success && dfsRes.data) setDfsStatus(dfsRes.data);
     } finally {
       setIsLoading(false);
     }
@@ -192,6 +202,43 @@ export function AdminPanelView() {
       loadKeys();
     } else {
       toast.error(res.error?.message || 'Failed to delete key.');
+    }
+  };
+
+  const handleSaveDataForSeo = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!dfsLogin.trim() || !dfsPassword.trim()) {
+      toast.error('Enter both your DataForSEO API login email and API password.');
+      return;
+    }
+    setIsSavingDfs(true);
+    try {
+      const res = await api.post<any>('/admin/dataforseo', {
+        login: dfsLogin.trim(),
+        password: dfsPassword.trim(),
+      });
+      if (res.success) {
+        const bal = res.data?.balance !== null && res.data?.balance !== undefined ? ` (Balance: $${res.data.balance})` : '';
+        toast.success((res.data?.message || 'DataForSEO connected!') + bal);
+        setDfsLogin('');
+        setDfsPassword('');
+        loadKeys();
+      } else {
+        toast.error(res.error?.message || 'Could not verify DataForSEO credentials.');
+      }
+    } finally {
+      setIsSavingDfs(false);
+    }
+  };
+
+  const handleDeleteDataForSeo = async () => {
+    if (!confirm('Disconnect DataForSEO v3 credentials?')) return;
+    const res = await api.delete<any>('/admin/dataforseo');
+    if (res.success) {
+      toast.info('DataForSEO credentials disconnected.');
+      loadKeys();
+    } else {
+      toast.error(res.error?.message || 'Could not disconnect DataForSEO.');
     }
   };
 
@@ -682,6 +729,76 @@ export function AdminPanelView() {
               </table>
             </div>
           </div>
+
+          {/* DataForSEO v3 Platform Credentials (Search Volume, KD, CPC & Backlinks) */}
+          <form onSubmit={handleSaveDataForSeo} className="p-5 bg-zinc-950 border border-zinc-800/80 rounded-2xl space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-bold uppercase tracking-wider text-zinc-200 flex items-center gap-2">
+                  <Database className="w-4 h-4 text-cyan-400" />
+                  DataForSEO v3 — Keyword Volume, KD, CPC &amp; Backlinks (Optional)
+                </div>
+                <p className="text-[11px] text-zinc-400 mt-0.5">
+                  Connect once here to unlock real monthly Search Volume, Keyword Difficulty (KD), CPC, full Competitor Keyword Databases, and Backlink Profiles for all workspaces. (Without DataForSEO, Keyword Gap still runs live competitor rankings via Serper.dev + Smart Cache.)
+                </p>
+              </div>
+              {dfsStatus?.configured ? (
+                <div className="flex items-center gap-2">
+                  <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                    Connected ({dfsStatus.login_hint})
+                  </span>
+                  {dfsStatus.source === 'admin_panel' && (
+                    <button
+                      type="button"
+                      onClick={handleDeleteDataForSeo}
+                      className="px-2.5 py-1 rounded-lg bg-zinc-900 hover:bg-rose-950/50 border border-zinc-800 text-rose-300 text-[11px] flex items-center gap-1"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      Disconnect
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <span className="px-2.5 py-1 rounded-full text-[11px] font-medium bg-zinc-900 text-zinc-400 border border-zinc-800">
+                  Not Connected (Serper Fallback Active)
+                </span>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+              <div className="md:col-span-5">
+                <label className="block text-[11px] text-zinc-400 mb-1">DataForSEO API Login (Email)</label>
+                <input
+                  type="email"
+                  required
+                  value={dfsLogin}
+                  onChange={(e) => setDfsLogin(e.target.value)}
+                  placeholder="your-email@company.com"
+                  className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-xl text-xs text-zinc-100 focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+              <div className="md:col-span-5">
+                <label className="block text-[11px] text-zinc-400 mb-1">DataForSEO API Password</label>
+                <input
+                  type="password"
+                  required
+                  value={dfsPassword}
+                  onChange={(e) => setDfsPassword(e.target.value)}
+                  placeholder="API password from app.dataforseo.com"
+                  className="w-full px-3 py-2 bg-zinc-900 border border-zinc-800 rounded-xl text-xs font-mono text-zinc-100 focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+              <div className="md:col-span-2 flex items-end">
+                <button
+                  type="submit"
+                  disabled={isSavingDfs}
+                  className="w-full py-2 px-3 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold transition disabled:opacity-50"
+                >
+                  {isSavingDfs ? 'Verifying...' : 'Verify & Save'}
+                </button>
+              </div>
+            </div>
+          </form>
         </div>
       )}
 

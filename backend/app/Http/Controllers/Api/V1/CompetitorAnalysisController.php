@@ -617,11 +617,15 @@ class CompetitorAnalysisController extends Controller
             'untapped' => CompetitorKeyword::where('website_id', $website->id)->where('gap_type', CompetitorKeyword::GAP_UNTAPPED)->count(),
         ];
 
+        $serpProvider = $this->providerManager->resolveForCapability('serp', $website->organization_id);
+
         return $this->success($items, [
             'total' => $total,
             'counts' => $counts,
             'provider_connected' => $this->providerManager->hasExternalProviderFor('keywords'),
             'active_provider' => $this->providerManager->resolveForCapability('keywords')->getName(),
+            'serp_provider_connected' => $serpProvider->getName() !== 'first_party_crawl',
+            'serp_provider_name' => $serpProvider->getName(),
         ]);
     }
 

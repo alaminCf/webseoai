@@ -105,6 +105,11 @@ Route::prefix('v1')->group(function () {
             Route::patch('/serp-keys/{key}', [AdminController::class, 'updateSerpKey']);
             Route::delete('/serp-keys/{key}', [AdminController::class, 'deleteSerpKey']);
 
+            // DataForSEO v3 Platform Credentials (Search Volume, KD, CPC, Backlinks)
+            Route::get('/dataforseo', [AdminController::class, 'getDataForSeo']);
+            Route::post('/dataforseo', [AdminController::class, 'saveDataForSeo']);
+            Route::delete('/dataforseo', [AdminController::class, 'deleteDataForSeo']);
+
             // Platform Settings (Quotas, Smart Cache TTL, Default Depth, Registration)
             Route::get('/settings', [AdminController::class, 'getSettings']);
             Route::put('/settings', [AdminController::class, 'updateSettings']);
