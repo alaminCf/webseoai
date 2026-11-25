@@ -26,6 +26,7 @@ import { WebsiteListView } from '@/components/WebsiteListView';
 import { SeoActionPlanView } from '@/components/SeoActionPlanView';
 import { AuditOverviewView } from '@/components/AuditOverviewView';
 import { CompetitorAnalysisView } from '@/components/competitors/CompetitorAnalysisView';
+import { KeywordIntelligenceView } from '@/components/keywords/KeywordIntelligenceView';
 import { ContentStudioView } from '@/components/ContentStudioView';
 import { RankCheckerView } from '@/components/RankCheckerView';
 import { ReportsCenterView } from '@/components/ReportsCenterView';
@@ -64,7 +65,7 @@ export default function DashboardPage() {
     const reason = params.get('reason');
     const websiteIdParam = params.get('website_id');
 
-    const validTabs = ['overview', 'websites', 'action_plan', 'audits', 'competitors', 'content', 'rank_checker', 'live_traffic', 'performance', 'reports', 'autopilot', 'team', 'settings', 'admin'];
+    const validTabs = ['overview', 'websites', 'action_plan', 'audits', 'keyword_research', 'competitors', 'content', 'rank_checker', 'live_traffic', 'performance', 'reports', 'autopilot', 'team', 'settings', 'admin'];
     if (tab && validTabs.includes(tab)) {
       setActiveTab(tab);
     }
@@ -311,6 +312,19 @@ export default function DashboardPage() {
               website={selectedWebsite}
               onRefreshWebsites={loadWebsites}
               onNavigateToStrategist={() => setActiveTab('action_plan')}
+            />
+          )}
+
+          {/* SECTION 4A: AI KEYWORD INTELLIGENCE & AUTOMATION */}
+          {activeTab === 'keyword_research' && (
+            <KeywordIntelligenceView
+              website={selectedWebsite}
+              onNavigateToActionPlan={() => setActiveTab('action_plan')}
+              onNavigateToContent={() => setActiveTab('content')}
+              onCheckLiveRank={(kw) => {
+                setPendingRankKeyword(kw);
+                setActiveTab('rank_checker');
+              }}
             />
           )}
 

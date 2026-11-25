@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\ContentStudioController;
 use App\Http\Controllers\Api\V1\ContextProfileController;
 use App\Http\Controllers\Api\V1\CrawlController;
+use App\Http\Controllers\Api\V1\KeywordIntelligenceController;
 use App\Http\Controllers\Api\V1\KeywordResearchController;
 use App\Http\Controllers\Api\V1\OrganizationController;
 use App\Http\Controllers\Api\V1\SearchConsoleController;
@@ -242,10 +243,66 @@ Route::prefix('v1')->group(function () {
                 ->middleware('org.role:seo_manager');
             Route::patch('/websites/{website}/opportunities/{opportunity}/status', [SearchOpportunityController::class, 'updateStatus']);
 
-            // Phase 4: Keyword Research Provider
+            // Phase 4: Keyword Research Provider (Legacy — preserved intact)
             Route::get('/keywords/search', [KeywordResearchController::class, 'search']);
             Route::get('/keywords/clusters', [KeywordResearchController::class, 'clusters']);
             Route::get('/keywords/history', [KeywordResearchController::class, 'history']);
+
+            // Phase 9: AI Keyword Intelligence & Automation System
+            Route::prefix('/websites/{website}/keyword-intelligence')->group(function () {
+                Route::get('/overview', [KeywordIntelligenceController::class, 'overview']);
+                Route::get('/providers', [KeywordIntelligenceController::class, 'providers']);
+                Route::post('/discover', [KeywordIntelligenceController::class, 'discover'])->middleware(['org.role:editor', 'throttle:25,1']);
+
+                Route::get('/keywords', [KeywordIntelligenceController::class, 'keywords']);
+                Route::post('/keywords/bulk', [KeywordIntelligenceController::class, 'bulkKeywords'])->middleware('org.role:editor');
+                Route::get('/keywords/{keyword}', [KeywordIntelligenceController::class, 'showKeyword']);
+                Route::post('/keywords/{keyword}/serp', [KeywordIntelligenceController::class, 'inspectSerp'])->middleware('throttle:30,1');
+                Route::patch('/keywords/{keyword}', [KeywordIntelligenceController::class, 'updateKeyword'])->middleware('org.role:editor');
+                Route::delete('/keywords/{keyword}', [KeywordIntelligenceController::class, 'destroyKeyword'])->middleware('org.role:editor');
+                Route::post('/keywords/{keyword}/send-action-plan', [KeywordIntelligenceController::class, 'sendKeywordToActionPlan'])->middleware('org.role:editor');
+                Route::post('/keywords/{keyword}/send-content-studio', [KeywordIntelligenceController::class, 'sendKeywordToContentStudio'])->middleware('org.role:editor');
+                Route::post('/keywords/{keyword}/monitor-rank', [KeywordIntelligenceController::class, 'monitorKeywordRank'])->middleware(['org.role:editor', 'throttle:20,1']);
+
+                Route::get('/history', [KeywordIntelligenceController::class, 'history']);
+                Route::get('/questions', [KeywordIntelligenceController::class, 'questions']);
+                Route::post('/questions/faq-ideas', [KeywordIntelligenceController::class, 'generateFaqIdeas'])->middleware('org.role:editor');
+                Route::get('/long-tail', [KeywordIntelligenceController::class, 'longTail']);
+                Route::get('/intent-summary', [KeywordIntelligenceController::class, 'intentSummary']);
+                Route::post('/intent/classify', [KeywordIntelligenceController::class, 'classifyIntentWithAi'])->middleware('org.role:editor');
+
+                Route::get('/opportunities', [KeywordIntelligenceController::class, 'opportunities']);
+                Route::put('/scoring-weights', [KeywordIntelligenceController::class, 'updateScoringWeights'])->middleware('org.role:editor');
+
+                Route::get('/clusters', [KeywordIntelligenceController::class, 'clusters']);
+                Route::get('/clusters/export', [KeywordIntelligenceController::class, 'exportClustersCsv']);
+                Route::post('/clusters/generate', [KeywordIntelligenceController::class, 'generateClusters'])->middleware('org.role:editor');
+                Route::post('/clusters', [KeywordIntelligenceController::class, 'createCluster'])->middleware('org.role:editor');
+                Route::post('/clusters/merge', [KeywordIntelligenceController::class, 'mergeClusters'])->middleware('org.role:editor');
+                Route::patch('/clusters/{cluster}', [KeywordIntelligenceController::class, 'updateCluster'])->middleware('org.role:editor');
+                Route::post('/clusters/{cluster}/split', [KeywordIntelligenceController::class, 'splitCluster'])->middleware('org.role:editor');
+                Route::post('/clusters/{cluster}/keywords', [KeywordIntelligenceController::class, 'addClusterKeywords'])->middleware('org.role:editor');
+                Route::delete('/clusters/{cluster}/keywords/{keyword}', [KeywordIntelligenceController::class, 'removeClusterKeyword'])->middleware('org.role:editor');
+                Route::delete('/clusters/{cluster}', [KeywordIntelligenceController::class, 'destroyCluster'])->middleware('org.role:editor');
+                Route::post('/clusters/{cluster}/send-content-studio', [KeywordIntelligenceController::class, 'sendClusterToContentStudio'])->middleware('org.role:editor');
+
+                Route::get('/cannibalization', [KeywordIntelligenceController::class, 'cannibalization']);
+                Route::post('/cannibalization/analyze', [KeywordIntelligenceController::class, 'analyzeCannibalization'])->middleware('org.role:editor');
+                Route::patch('/cannibalization/{finding}', [KeywordIntelligenceController::class, 'updateCannibalizationStatus'])->middleware('org.role:editor');
+
+                Route::post('/strategist/analyze', [KeywordIntelligenceController::class, 'strategistAnalyze'])->middleware(['org.role:editor', 'throttle:15,1']);
+
+                Route::get('/automations', [KeywordIntelligenceController::class, 'automations']);
+                Route::post('/automations', [KeywordIntelligenceController::class, 'createAutomation'])->middleware('org.role:editor');
+                Route::patch('/automations/{workflow}', [KeywordIntelligenceController::class, 'updateAutomation'])->middleware('org.role:editor');
+                Route::post('/automations/{workflow}/run', [KeywordIntelligenceController::class, 'runAutomation'])->middleware(['org.role:editor', 'throttle:15,1']);
+                Route::delete('/automations/{workflow}', [KeywordIntelligenceController::class, 'destroyAutomation'])->middleware('org.role:editor');
+                Route::get('/automations/{workflow}/runs', [KeywordIntelligenceController::class, 'automationRuns']);
+
+                Route::get('/alerts', [KeywordIntelligenceController::class, 'alerts']);
+                Route::patch('/alerts/{alert}/read', [KeywordIntelligenceController::class, 'markAlertRead']);
+                Route::post('/alerts/read-all', [KeywordIntelligenceController::class, 'markAllAlertsRead']);
+            });
 
             // Phase 5: CMS Integrations and Safe SEO Execution
             Route::get('/websites/{website}/cms/capabilities', [CmsExecutionController::class, 'capabilities']);

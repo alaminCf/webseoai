@@ -21,6 +21,7 @@ import {
   Radio,
   Crosshair,
   FileDown,
+  KeyRound,
 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { ThemeToggle } from './ThemeToggle';
@@ -54,6 +55,7 @@ export function Sidebar({
     { id: 'websites', label: 'My Websites', icon: Globe },
     { id: 'action_plan', label: 'SEO Action Plan', icon: Sparkles, badge: 'AI' },
     { id: 'audits', label: 'Site Audit', icon: Activity },
+    { id: 'keyword_research', label: 'Keyword Research', icon: KeyRound, badge: 'AI' },
     { id: 'competitors', label: 'Competitor Analysis', icon: Target, badge: 'NEW' },
     { id: 'content', label: 'Content Studio', icon: FileText },
     { id: 'rank_checker', label: 'Rank Checker', icon: Crosshair, badge: 'SERP' },
