@@ -150,13 +150,28 @@ class ApiClient {
           continue;
         }
 
-        const data: ApiResponse<T> = await res.json().catch(() => ({
-          success: false,
-          error: {
-            code: res.status === 401 ? 'UNAUTHENTICATED' : 'NETWORK_OR_PARSING_ERROR',
-            message: `Server returned HTTP ${res.status} with invalid JSON.`,
-          },
-        }));
+        const rawJson = await res.json().catch(() => null);
+        const data: ApiResponse<T> = rawJson
+          ? (rawJson as ApiResponse<T>)
+          : {
+              success: false,
+              error: {
+                code: res.status === 401 ? 'UNAUTHENTICATED' : 'NETWORK_OR_PARSING_ERROR',
+                message: `Server returned HTTP ${res.status} with invalid JSON.`,
+              },
+            };
+
+        if (!res.ok && !data.error?.message) {
+          const fallbackMsg =
+            (rawJson && typeof rawJson === 'object' && 'message' in rawJson && typeof (rawJson as { message?: unknown }).message === 'string'
+              ? (rawJson as { message: string }).message
+              : null) || `Request failed with HTTP ${res.status}.`;
+          data.success = false;
+          data.error = {
+            code: res.status === 401 ? 'UNAUTHENTICATED' : `HTTP_${res.status}`,
+            message: fallbackMsg,
+          };
+        }
 
         if (!data.success && !data.error?.code && res.status === 401) {
           data.error = {

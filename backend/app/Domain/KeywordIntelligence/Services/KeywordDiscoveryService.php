@@ -285,8 +285,23 @@ class KeywordDiscoveryService
         $updatedCount = 0;
         $persistedIds = [];
 
+        // Pre-load existing market keywords in ONE batch query to avoid N+1 remote DB round-trips
+        $normKeys = array_keys($mergedByNorm);
+        $existingMap = !empty($normKeys)
+            ? KiKeyword::where('website_id', $website->id)
+                ->where('country', $country)
+                ->where('language', $language)
+                ->whereIn('normalized_keyword', $normKeys)
+                ->get()
+                ->keyBy('normalized_keyword')
+            : collect();
+
+        $now = now();
+        $historyBatch = [];
+
         DB::transaction(function () use (
             $mergedByNorm,
+            $existingMap,
             $website,
             $project,
             $seedRecord,
@@ -300,29 +315,29 @@ class KeywordDiscoveryService
             $weights,
             $contextTerms,
             $crawledTitles,
+            $now,
             &$newCount,
             &$updatedCount,
-            &$persistedIds
+            &$persistedIds,
+            &$historyBatch
         ) {
             foreach ($mergedByNorm as $norm => $item) {
                 $kwText = mb_substr(trim((string) $item['keyword']), 0, 250);
                 if ($kwText === '') {
                     continue;
                 }
+                $safeNorm = mb_substr($norm, 0, 250);
 
                 $qCat = $this->intentService->detectQuestionCategory($kwText);
                 $wordCount = $this->intentService->countWords($kwText);
                 $isLongTail = $this->intentService->isLongTail($kwText, $qCat);
                 $intentInfo = $this->intentService->classifyKeyword($kwText, $item['search_intent'] ?? null, $website->name);
 
-                $gscRow = $gscMap[$norm] ?? null;
-                $compCount = (int) ($competitorCoverageMap[$norm] ?? 0);
+                $gscRow = $gscMap[$safeNorm] ?? null;
+                $compCount = (int) ($competitorCoverageMap[$safeNorm] ?? 0);
 
-                $existing = KiKeyword::where('website_id', $website->id)
-                    ->where('normalized_keyword', $norm)
-                    ->where('country', $country)
-                    ->where('language', $language)
-                    ->first();
+                /** @var ?KiKeyword $existing */
+                $existing = $existingMap->get($safeNorm);
 
                 $currentPosition = $item['target_position'] ?? ($gscRow['avg_position'] ?? ($existing?->current_position));
                 $rankingUrl = $item['ranking_url'] ?? ($gscRow['top_url'] ?? ($existing?->ranking_url));
@@ -362,13 +377,13 @@ class KeywordDiscoveryService
                     'project_id' => $project->id,
                     'seed_keyword_id' => $existing?->seed_keyword_id ?? $seedRecord->id,
                     'keyword' => $kwText,
-                    'normalized_keyword' => $norm,
+                    'normalized_keyword' => $safeNorm,
                     'country' => $country,
                     'language' => $language,
                     'search_engine' => $searchEngine,
                     'device' => $device,
-                    'location' => $location,
-                    'discovery_source' => $existing?->discovery_source ?? ($item['discovery_source'] ?? 'suggestions'),
+                    'location' => $location ? mb_substr($location, 0, 145) : null,
+                    'discovery_source' => mb_substr((string) ($existing?->discovery_source ?? ($item['discovery_source'] ?? 'suggestions')), 0, 48),
                     'question_category' => $qCat,
                     'is_long_tail' => $isLongTail,
                     'word_count' => $wordCount,
@@ -393,9 +408,9 @@ class KeywordDiscoveryService
                     'gsc_impressions' => $gscImpressions,
                     'gsc_ctr' => $gscCtr,
                     'competitor_coverage_count' => max($compCount, (int) ($existing?->competitor_coverage_count ?? 0)),
-                    'data_source' => $item['data_source'] ?? ($existing?->data_source ?? 'google_autocomplete'),
-                    'metric_classification' => $metricClass,
-                    'last_updated_at' => now(),
+                    'data_source' => mb_substr((string) ($item['data_source'] ?? ($existing?->data_source ?? 'google_autocomplete')), 0, 58),
+                    'metric_classification' => mb_substr((string) $metricClass, 0, 38),
+                    'last_updated_at' => $now,
                 ];
 
                 $scored = $this->opportunityService->scoreKeywordAttributes($attrs, $weights, $contextTerms, $crawledTitles);
@@ -412,8 +427,7 @@ class KeywordDiscoveryService
 
                 $persistedIds[] = $model->id;
 
-                // Snapshot into keyword history
-                KiKeywordHistory::create([
+                $historyBatch[] = [
                     'organization_id' => $website->organization_id,
                     'website_id' => $website->id,
                     'keyword_id' => $model->id,
@@ -425,8 +439,16 @@ class KeywordDiscoveryService
                     'gsc_clicks' => $model->gsc_clicks,
                     'gsc_impressions' => $model->gsc_impressions,
                     'data_source' => $model->data_source,
-                    'captured_at' => now(),
-                ]);
+                    'captured_at' => $now,
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ];
+            }
+
+            if (!empty($historyBatch)) {
+                foreach (array_chunk($historyBatch, 100) as $chunk) {
+                    KiKeywordHistory::insert($chunk);
+                }
             }
         });
 
@@ -672,9 +694,23 @@ class KeywordDiscoveryService
         }
         if (!empty($input['website_url'])) {
             $host = parse_url(str_contains((string) $input['website_url'], '://') ? (string) $input['website_url'] : 'https://' . $input['website_url'], PHP_URL_HOST) ?: (string) $input['website_url'];
-            $slug = trim(str_replace(['www.', '-', '_', '.com', '.org', '.net', '.io', '.co', '.ai'], ' ', strtolower($host)));
+            $cleanHost = preg_replace('/^www\./i', '', strtolower((string) $host));
+            $slug = trim(str_replace(['www.', '-', '_', '.com', '.org', '.net', '.io', '.co', '.ai'], ' ', strtolower((string) $host)));
             if ($slug !== '') {
                 $seeds[] = preg_replace('/\s+/', ' ', $slug);
+            }
+
+            // Enrich URL-based research with the website's verified core topics / top GSC queries when researching the target site
+            $siteHost = preg_replace('/^www\./i', '', strtolower((string) $website->domain));
+            if ($cleanHost === $siteHost) {
+                $profileTopics = is_array($website->contextProfile?->core_topics ?? null)
+                    ? $website->contextProfile->core_topics
+                    : [];
+                foreach (array_slice($profileTopics, 0, 2) as $topic) {
+                    if (is_string($topic) && trim($topic) !== '') {
+                        $seeds[] = trim($topic);
+                    }
+                }
             }
         }
 

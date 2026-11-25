@@ -280,9 +280,9 @@ class KeywordOpportunityService
         return [
             'opportunity_score' => $score,
             'relevance_score' => round($relevanceScore, 2),
-            'ranking_potential' => $rankingPotential,
-            'competition_level' => $compLevel,
-            'opportunity_category' => $category,
+            'ranking_potential' => mb_substr($rankingPotential, 0, 95),
+            'competition_level' => $compLevel !== null ? mb_substr((string) $compLevel, 0, 35) : null,
+            'opportunity_category' => mb_substr($category, 0, 45),
             'recommended_priority' => $priority,
             'opportunity_reason' => implode(' • ', array_slice($reasons, 0, 4)) . '.',
             'data_confidence' => $dataConfidence,

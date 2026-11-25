@@ -180,6 +180,25 @@ class KeywordIntelligenceSystemTest extends TestCase
             ->assertJsonPath('data.new_keywords', 0);
 
         $this->assertSame($countAfterFirstRun, KiKeyword::where('website_id', $this->website->id)->count());
+
+        // Verify Website URL discovery mode for BD market & PostgreSQL VARCHAR length safety
+        $urlRes = $this->actingAs($this->user)
+            ->withHeaders($this->authHeaders())
+            ->postJson("/api/v1/websites/{$this->website->id}/keyword-intelligence/discover", [
+                'seed_type' => 'url',
+                'website_url' => 'https://www.carematebd.com',
+                'country' => 'BD',
+                'language' => 'en',
+                'search_engine' => 'google',
+                'device' => 'desktop',
+                'search_network' => 'google_search',
+            ]);
+
+        $urlRes->assertOk()->assertJsonPath('success', true);
+        foreach (KiKeyword::where('website_id', $this->website->id)->get() as $persisted) {
+            $this->assertLessThanOrEqual(100, strlen((string) $persisted->ranking_potential));
+            $this->assertLessThanOrEqual(50, strlen((string) $persisted->opportunity_category));
+        }
     }
 
     public function test_provider_failure_is_isolated_gracefully(): void

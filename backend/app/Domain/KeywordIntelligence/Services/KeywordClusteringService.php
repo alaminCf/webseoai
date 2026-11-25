@@ -541,11 +541,11 @@ class KeywordClusteringService
         $cluster = KiCluster::create([
             'organization_id' => $website->organization_id,
             'website_id' => $website->id,
-            'name' => ucwords($primary->keyword),
-            'primary_keyword' => $primary->keyword,
+            'name' => mb_substr(ucwords($primary->keyword), 0, 175),
+            'primary_keyword' => mb_substr($primary->keyword, 0, 250),
             'clustering_method' => $method,
             'search_intent' => $primary->search_intent ?: 'informational',
-            'suggested_pillar_page' => $this->suggestPillarTitle($primary->keyword, $primary->search_intent),
+            'suggested_pillar_page' => mb_substr($this->suggestPillarTitle($primary->keyword, $primary->search_intent), 0, 250),
             'is_saved' => false,
         ]);
 
